@@ -66,4 +66,5 @@ matlab.mat (MATLAB stereoParameters)
 - 2026-09-07：初始化仓库（本地 git 管理，无远程）。`left/`、`right/`、`pair/`、`underwater_calibration_images/` 图像数据不入库；标定参数 npz/mat 和角点 npz 保留入库以便回滚到已验证的标定结果。
 - 2026-09-08：rect.py 与 rect_water.py 的采集/归档模式已统一：采集阶段只缓存+落盘原图（不做实时角点检测），`q` 后统一批量检测、左右都成功才计入标定；原图均按程序启动时间戳归档到 `<glass|underwater>_calibration_images/<时间戳>/{left,right,pair}/`，目录不入库。
 - 2026-09-08：**标定历史归档机制**：每次标定完整产物（原图/角点/参数/报告）写入 `calibration_history/<stage>/<时间戳>/`，只增不覆盖（起因：水下标定曾被一张角点 180° 翻转的坏图污染且无法溯源到具体图片）。根目录 npz 仍是"最新版"语义；角点 npz 新增 `left_files`/`right_files` 键关联原图文件名；`calibration_history/**/images/` 不入库，其余入库。
+- 2026-09-08：**历史数据手工规整**：过去的 run 全部并入 `calibration_history/`（glass×3、underwater×2，含被污染的 21:35 水下 run 及其事后诊断报告、从 git 初始提交找回的已废弃玻璃版）；旧目录 `glass_calibration_images/`、`underwater_calibration_images/` 已删除，当天第一条规则中的原图归档路径由本机制取代。run 索引见 `calibration_history/README.md`。
 - 2026-09-08：**调用 subagent（Agent 工具）并行执行时，并行数不得超过 3**——模型 API 有限速，超并行会触发 429。大任务按 3+2 分波执行（例：论文翻译即分两波）。

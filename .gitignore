@@ -10,8 +10,6 @@ __pycache__/
 left/
 right/
 pair/
-glass_calibration_images/
-underwater_calibration_images/
 
 # 历史标定归档：只忽略原图，角点/参数 npz 与标定报告入库
 calibration_history/**/images/
