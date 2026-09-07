@@ -18,6 +18,9 @@ calibration_history/**/images/
 _pdf_figs/
 _pdf_pages/
 
+# 临时草稿目录
+_tmp/
+
 # Windows
 Thumbs.db
 Desktop.ini
