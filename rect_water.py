@@ -11,20 +11,36 @@ rect_underwater_calib_and_depth.py
 4. 固定水下 K/dist 后，重新最大似然估计水下双目 R/T；
 5. 重新 stereoRectify，生成水下专用 map 和 Q；
 6. 保存 stereo_params_updated_underwater.npz；
-7. 直接调用 StereoDepthRunner 测深。
+7. 调用 SamplingStereoDepthRunner（StereoDepthRunner 子类）测深，
+   测深阶段可按 s 保存深度验证样本。
 
 注意：
 - 不使用 1.33 经验缩放；
 - Q 仍然输出 cm；
 - SQUARE_SIZE 用 cm，则水下 T 和 Q 都是 cm；
 - 下水测试时，玻璃/外壳/相机相对位置必须和采集标定时一致。
+
+两个阶段的按键动作：
+【阶段一：标定采集】（窗口 underwater_left_detect / underwater_right_detect / underwater_pair_detect）
+  s      缓存并落盘当前左右原图（采集阶段不实时检测角点，避免卡顿）
+  q/ESC  结束采集，随后统一批量检测角点并执行标定计算
+【阶段二：测深】（窗口 rectified_pair_underwater / disparity_underwater）
+  鼠标左键 在校正图左半边点击选择待测点，实时显示该点 X/Y/Z/距离
+  s      保存一条深度验证样本（要求当前已有待测点且视差有效，否则仅提示警告、不保存）：
+         保存当前帧原始左右图与该点测量数据，弹窗输入实测真实深度（含测量误差），
+         一并追加到归档目录 depth_samples/ 的 depth_samples.json；
+         弹窗取消则整条放弃，不保存任何文件（弹窗期间实时画面暂停属正常）
+  q/ESC  退出测深
 """
+
+import json
 
 import cv2
 import numpy as np
 from datetime import datetime
 from pathlib import Path
 
+import stereo_depth_core
 from stereo_depth_core import StereoDepthRunner
 
 
@@ -50,6 +66,9 @@ UNDERWATER_NPZ_OUTPUT = SCRIPT_DIR / "stereo_params_updated_underwater.npz"
 
 # 保存水下角点，方便以后不重新采集
 UNDERWATER_CORNERS_OUTPUT = SCRIPT_DIR / "underwater_chessboard_corners.npz"
+
+# 测深阶段按 s 保存的深度验证样本目录（原始左右图 + depth_samples.json）
+DEPTH_SAMPLES_DIR = RUN_DIR / "depth_samples"
 
 
 # =========================================================
@@ -690,6 +709,184 @@ def write_calibration_report(
     print(f"✅ 已归档标定报告: {report_path}")
 
 
+# =========================================================
+# 5. 测深阶段 s 键采样：真实深度输入弹窗 + 采样版 Runner
+# =========================================================
+def ask_true_depth_cm():
+    """
+    弹出 tkinter 输入框，让用户输入测点的实测真实深度（cm）。
+    用户取消或直接关闭弹窗时返回 None。
+    tkinter 在函数内延迟导入，避免不用此功能时的额外开销。
+    """
+    import tkinter as tk
+    from tkinter import simpledialog
+
+    root = tk.Tk()
+    root.withdraw()
+    root.attributes("-topmost", True)
+    try:
+        value = simpledialog.askfloat(
+            title="输入真实深度",
+            prompt="请输入该测点的实测真实深度 Z（cm）：",
+            parent=root,
+            minvalue=0.0,
+        )
+    finally:
+        root.destroy()
+    return value
+
+
+class SamplingStereoDepthRunner(StereoDepthRunner):
+    """
+    在 StereoDepthRunner 基础上增加测深阶段的 s 键采样动作：
+
+    按下 s 时（要求当前已点击待测点且该点视差有效，否则仅警告、不保存）：
+    1. 保存当前帧的原始左右图（未校正、未标注，可事后离线复算）；
+    2. 弹窗输入实测真实深度，取消则整条放弃；
+    3. 把图像文件名、像素坐标、测量值（disp/X/Y/Z/距离）、真实值和误差
+       追加写入 sample_dir/depth_samples.json。
+    """
+
+    def __init__(self, *args, sample_dir, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.sample_dir = Path(sample_dir)
+        self.sample_json_path = self.sample_dir / "depth_samples.json"
+
+    def save_depth_sample(self, left, right, point, result):
+        """s 键动作的实际落盘逻辑。"""
+        if point is None:
+            print("⚠️ 当前没有待检测的点：请先在校正图左半边点击目标点，再按 s 保存样本。")
+            return
+
+        if result is None:
+            print("⚠️ 该点本帧无有效深度（视差无效），本条样本不保存。")
+            return
+
+        true_z = ask_true_depth_cm()
+        if true_z is None:
+            print("⚠️ 已取消输入真实深度，本条样本整条放弃（未保存图像和数据）。")
+            return
+
+        self.sample_dir.mkdir(parents=True, exist_ok=True)
+
+        records = []
+        if self.sample_json_path.exists():
+            try:
+                with open(self.sample_json_path, "r", encoding="utf-8") as f:
+                    records = json.load(f)
+            except ValueError:
+                print(f"⚠️ {self.sample_json_path} 解析失败，忽略旧记录重新计数（将被覆写）。")
+                records = []
+
+        index = len(records) + 1
+        left_name = f"left_{index:03d}.png"
+        right_name = f"right_{index:03d}.png"
+
+        ok_l = imwrite_unicode(self.sample_dir / left_name, left)
+        ok_r = imwrite_unicode(self.sample_dir / right_name, right)
+        if not (ok_l and ok_r):
+            print(f"⚠️ 样本图像落盘失败（left={ok_l}, right={ok_r}），本条记录不写入 json。")
+            return
+
+        err = result["Z"] - true_z
+        err_rate = abs(err) / true_z * 100.0
+
+        records.append({
+            "index": index,
+            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
+            "left_image": left_name,
+            "right_image": right_name,
+            "pixel": {"x": int(point[0]), "y": int(point[1])},
+            "measured": {
+                "disp_px": result["disp"],
+                "X_cm": result["X"],
+                "Y_cm": result["Y"],
+                "Z_cm": result["Z"],
+                "dist_cm": result["D"],
+                "valid_count": result["valid_count"],
+            },
+            "true_z_cm": true_z,
+            "error_cm": err,
+            "error_rate_percent": err_rate,
+        })
+
+        with open(self.sample_json_path, "w", encoding="utf-8") as f:
+            json.dump(records, f, ensure_ascii=False, indent=2)
+
+        print(
+            f"✅ 已保存深度样本 #{index}: 测量 Z={result['Z']:.3f} cm, "
+            f"真实 Z={true_z:.3f} cm, 误差 {err:+.3f} cm ({err_rate:.2f}%)"
+        )
+        print(f"   样本目录: {self.sample_dir}")
+
+    def run(self):
+        """
+        覆写基类 run()：主循环与基类一致，仅增加 s 键采样分支。
+        点击点的全局量在 stereo_depth_core 模块内，必须通过模块属性读写。
+        """
+        # 复位进程内可能残留的上一次点击点
+        stereo_depth_core.clicked_point = None
+
+        cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
+        cv2.namedWindow(self.disparity_window_name, cv2.WINDOW_NORMAL)
+        cv2.setMouseCallback(
+            self.window_name,
+            stereo_depth_core.on_mouse,
+            {"left_width": self.left_width, "height": self.height},
+        )
+
+        print("\n========== 测深阶段按键 ==========")
+        print("  鼠标左键：在校正图左半边点击选择待测点，实时显示深度")
+        print("  s：保存深度验证样本（当前左右原图 + 测量数据 + 弹窗输入真实深度）")
+        print("  q / ESC：退出")
+        print(f"  样本保存目录: {self.sample_dir}\n")
+
+        while True:
+            ret, frame = self.cap.read()
+            if not ret or frame is None:
+                print("读取摄像头失败")
+                break
+
+            left, right = self.split_frame(frame)
+            rect_left, rect_right = self.rectify(left, right)
+            disparity = self.compute_disparity(rect_left, rect_right)
+            points_3d = self.reproject(disparity)
+
+            show_left = rect_left.copy()
+            show_right = rect_right.copy()
+
+            point = stereo_depth_core.clicked_point
+            result = None
+            if point is not None:
+                x, y = point
+                if 0 <= x < self.left_width and 0 <= y < self.height:
+                    result = self.measure_depth(disparity, points_3d, x, y)
+                    show_left = self.draw_measurement(show_left, point, result)
+                    self.print_measurement(point, result)
+
+            for yy in range(0, self.height, 40):
+                cv2.line(show_left, (0, yy), (self.left_width, yy), (255, 0, 0), 1)
+                cv2.line(show_right, (0, yy), (self.left_width, yy), (255, 0, 0), 1)
+
+            pair_show = cv2.hconcat([show_left, show_right])
+            disp_show = self.disparity_to_color(disparity)
+
+            cv2.imshow(self.window_name, pair_show)
+            cv2.imshow(self.disparity_window_name, disp_show)
+
+            key = cv2.waitKey(1) & 0xFF
+
+            if key in (ord("q"), ord("Q"), 27):
+                break
+
+            if key in (ord("s"), ord("S")):
+                # left/right 是喂给校正的原始左右图；result 是本帧该测点的测量结果
+                self.save_depth_sample(left, right, point, result)
+
+        self.cap.release()
+        cv2.destroyAllWindows()
+
+
 def main():
     # 在任何标定计算之前创建本次标定的归档目录（原图/角点/参数/报告都放这里）。
     RUN_DIR.mkdir(parents=True, exist_ok=True)
@@ -783,7 +980,7 @@ def main():
     # Step 5：直接启动水下测深
     if RUN_DEPTH_AFTER_CALIB:
         print("\n========== 启动水下实时测深 ==========")
-        runner = StereoDepthRunner(
+        runner = SamplingStereoDepthRunner(
             param_file=UNDERWATER_NPZ_OUTPUT,
             camera_id=CAMERA_ID,
             frame_width=FRAME_WIDTH,
@@ -793,6 +990,7 @@ def main():
             true_z_cm=None,
             window_name="rectified_pair_underwater",
             disparity_window_name="disparity_underwater",
+            sample_dir=DEPTH_SAMPLES_DIR,
         )
         runner.run()
 

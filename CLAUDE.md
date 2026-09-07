@@ -68,3 +68,4 @@ matlab.mat (MATLAB stereoParameters)
 - 2026-09-08：**标定历史归档机制**：每次标定完整产物（原图/角点/参数/报告）写入 `calibration_history/<stage>/<时间戳>/`，只增不覆盖（起因：水下标定曾被一张角点 180° 翻转的坏图污染且无法溯源到具体图片）。根目录 npz 仍是"最新版"语义；角点 npz 新增 `left_files`/`right_files` 键关联原图文件名；`calibration_history/**/images/` 不入库，其余入库。
 - 2026-09-08：**历史数据手工规整**：过去的 run 全部并入 `calibration_history/`（glass×3、underwater×2，含被污染的 21:35 水下 run 及其事后诊断报告、从 git 初始提交找回的已废弃玻璃版）；旧目录 `glass_calibration_images/`、`underwater_calibration_images/` 已删除，当天第一条规则中的原图归档路径由本机制取代。run 索引见 `calibration_history/README.md`。
 - 2026-09-08：**调用 subagent（Agent 工具）并行执行时，并行数不得超过 3**——模型 API 有限速，超并行会触发 429。大任务按 3+2 分波执行（例：论文翻译即分两波）。
+- 2026-09-08：**测深阶段 s 键采样**：rect.py / rect_water.py 标定后进入测深时按 s，把当前帧原始左右图 + 该点测量值（disp/X/Y/Z/D）+ tkinter 弹窗输入的真实深度保存为一条验证样本，落在本次 run 目录 `depth_samples/`（`left_XXX.png`、`right_XXX.png` + `depth_samples.json` 追加记录，含误差字段）。无待测点或视差无效仅警告不保存；弹窗取消则整条放弃。实现为两脚本各自的 `SamplingStereoDepthRunner`（覆写 run() 加 s 分支），`stereo_depth_core.py` 保持不动。
