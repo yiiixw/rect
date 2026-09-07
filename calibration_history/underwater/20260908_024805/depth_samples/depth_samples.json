@@ -1,0 +1,191 @@
+[
+  {
+    "index": 1,
+    "time": "2026-09-08 02:49:58.315",
+    "left_image": "left_001.png",
+    "right_image": "right_001.png",
+    "pixel": {
+      "x": 349,
+      "y": 263
+    },
+    "measured": {
+      "disp_px": 59.125,
+      "X_cm": 2.5142956615447996,
+      "Y_cm": 0.22519579790085553,
+      "Z_cm": 33.66972657482147,
+      "dist_cm": 33.76422490513138,
+      "valid_count": 81
+    },
+    "true_z_cm": 34.0,
+    "error_cm": -0.3302734251785324,
+    "error_rate_percent": 0.9713924269956835
+  },
+  {
+    "index": 2,
+    "time": "2026-09-08 02:50:14.830",
+    "left_image": "left_002.png",
+    "right_image": "right_002.png",
+    "pixel": {
+      "x": 349,
+      "y": 263
+    },
+    "measured": {
+      "disp_px": 50.5625,
+      "X_cm": 2.936970717573166,
+      "Y_cm": 0.2630531985402107,
+      "Z_cm": 39.619890113563535,
+      "dist_cm": 39.72946874288648,
+      "valid_count": 81
+    },
+    "true_z_cm": 40.0,
+    "error_cm": -0.3801098864364647,
+    "error_rate_percent": 0.9502747160911618
+  },
+  {
+    "index": 3,
+    "time": "2026-09-08 02:50:38.629",
+    "left_image": "left_003.png",
+    "right_image": "right_003.png",
+    "pixel": {
+      "x": 349,
+      "y": 263
+    },
+    "measured": {
+      "disp_px": 68.375,
+      "X_cm": 2.1718550345420837,
+      "Y_cm": 0.19452470988333223,
+      "Z_cm": 28.91636132175445,
+      "dist_cm": 28.99846110130808,
+      "valid_count": 81
+    },
+    "true_z_cm": 29.0,
+    "error_cm": -0.08363867824554916,
+    "error_rate_percent": 0.2884092353294798
+  },
+  {
+    "index": 4,
+    "time": "2026-09-08 02:51:01.271",
+    "left_image": "left_004.png",
+    "right_image": "right_004.png",
+    "pixel": {
+      "x": 349,
+      "y": 263
+    },
+    "measured": {
+      "disp_px": 85.375,
+      "X_cm": 1.7393918689846992,
+      "Y_cm": 0.1559047862187028,
+      "Z_cm": 22.866453572578425,
+      "dist_cm": 22.933043613160912,
+      "valid_count": 81
+    },
+    "true_z_cm": 23.0,
+    "error_cm": -0.13354642742157452,
+    "error_rate_percent": 0.5806366409633674
+  },
+  {
+    "index": 5,
+    "time": "2026-09-08 02:51:29.128",
+    "left_image": "left_005.png",
+    "right_image": "right_005.png",
+    "pixel": {
+      "x": 349,
+      "y": 263
+    },
+    "measured": {
+      "disp_px": 111.8125,
+      "X_cm": 1.3281215189814566,
+      "Y_cm": 0.1189547442704439,
+      "Z_cm": 17.113020497531892,
+      "dist_cm": 17.164892296467016,
+      "valid_count": 81
+    },
+    "true_z_cm": 18.0,
+    "error_cm": -0.8869795024681082,
+    "error_rate_percent": 4.927663902600601
+  },
+  {
+    "index": 6,
+    "time": "2026-09-08 02:51:46.044",
+    "left_image": "left_006.png",
+    "right_image": "right_006.png",
+    "pixel": {
+      "x": 349,
+      "y": 263
+    },
+    "measured": {
+      "disp_px": 152.9375,
+      "X_cm": 0.9709887143552303,
+      "Y_cm": 0.0871457922950387,
+      "Z_cm": 12.116939754886626,
+      "dist_cm": 12.1560948703139,
+      "valid_count": 81
+    },
+    "true_z_cm": 13.0,
+    "error_cm": -0.8830602451133736,
+    "error_rate_percent": 6.79277111625672
+  },
+  {
+    "index": 7,
+    "time": "2026-09-08 02:52:20.601",
+    "left_image": "left_007.png",
+    "right_image": "right_007.png",
+    "pixel": {
+      "x": 349,
+      "y": 263
+    },
+    "measured": {
+      "disp_px": 186.0,
+      "X_cm": 0.7983902169764041,
+      "Y_cm": 0.07150874572843313,
+      "Z_cm": 9.702387032241822,
+      "dist_cm": 9.735443213469717,
+      "valid_count": 81
+    },
+    "true_z_cm": 10.0,
+    "error_cm": -0.29761296775817847,
+    "error_rate_percent": 2.9761296775817847
+  },
+  {
+    "index": 8,
+    "time": "2026-09-08 02:52:39.474",
+    "left_image": "left_008.png",
+    "right_image": "right_008.png",
+    "pixel": {
+      "x": 349,
+      "y": 263
+    },
+    "measured": {
+      "disp_px": 85.8125,
+      "X_cm": 1.7305238732218742,
+      "Y_cm": 0.15499638447239994,
+      "Z_cm": 22.742397632713313,
+      "dist_cm": 22.80866911591806,
+      "valid_count": 81
+    },
+    "true_z_cm": 7.0,
+    "error_cm": 15.742397632713313,
+    "error_rate_percent": 224.8913947530473
+  },
+  {
+    "index": 9,
+    "time": "2026-09-08 02:53:08.984",
+    "left_image": "left_009.png",
+    "right_image": "right_009.png",
+    "pixel": {
+      "x": 349,
+      "y": 263
+    },
+    "measured": {
+      "disp_px": 53.375,
+      "X_cm": 2.769241718459129,
+      "Y_cm": 0.24919206770211458,
+      "Z_cm": 37.454907720108025,
+      "dist_cm": 37.55796731325682,
+      "valid_count": 81
+    },
+    "true_z_cm": 37.0,
+    "error_cm": 0.45490772010802516,
+    "error_rate_percent": 1.2294803246162842
+  }
+]
