@@ -173,10 +173,25 @@ def enhance_for_chessboard(gray):
     return gray_eq
 
 
+def canonicalize_corner_order(corners):
+    """
+    消除棋盘格角点的 180° 起点歧义。
+
+    8x11 内角点网格本身 180° 旋转对称，检测器可能从任一对角返回角点链。
+    单目标定对此无感（等价于板的另一种合法位姿），但左右视图起点不一致时
+    双目逐点对应全错，会把 stereoCalibrate 整体拖歪（曾导致基线塌缩）。
+    规定角点链首角在图像上方，左右两视图统一规范后即安全。
+    """
+    if corners[0, 1] > corners[-1, 1]:
+        return corners[::-1].copy()
+    return corners
+
+
 def detect_corners(img_bgr, pattern_size):
     """
     检测单张图里的棋盘格角点。
     优先使用 findChessboardCornersSB，失败再用传统 findChessboardCorners。
+    返回前统一角点链方向（消除 180° 起点歧义）。
     """
     gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
     gray_eq = enhance_for_chessboard(gray)
@@ -190,7 +205,7 @@ def detect_corners(img_bgr, pattern_size):
 
     if ret:
         corners = corners.astype(np.float32)
-        return True, corners.reshape(-1, 2)
+        return True, canonicalize_corner_order(corners.reshape(-1, 2))
 
     # 传统方法兜底
     flags = (
@@ -213,7 +228,7 @@ def detect_corners(img_bgr, pattern_size):
             zeroZone=(-1, -1),
             criteria=criteria
         )
-        return True, corners.reshape(-1, 2)
+        return True, canonicalize_corner_order(corners.reshape(-1, 2))
 
     return False, None
 
@@ -580,12 +595,17 @@ def stereo_calibrate_fixed_intrinsic(
     dist1,
     K2,
     dist2,
-    img_size
+    img_size,
+    baseline_expect_cm=None
 ):
     """
-    固定左右 K/dist，只重新估计双目 R/T。
+    固定左右 K/dist，只重新估计双目 R/T。带逐图离群门控。
 
-    因为 objpoints 的单位是 cm，所以这里得到的 T 也是 cm。
+    单张图左右角点对应错乱（典型为 180° 起点翻转）会把最小二乘整体拖歪，
+    门控流程：拟合 -> 逐图重投影误差检验 -> 坏组尝试角点倒序找回 ->
+    找不回则剔除 -> 重拟合，迭代到无坏组为止。
+
+    baseline_expect_cm：传入空气阶段基线（cm）作为物理参照，偏差过大时告警。
     """
     flags = cv2.CALIB_FIX_INTRINSIC
 
@@ -595,32 +615,102 @@ def stereo_calibrate_fixed_intrinsic(
         1e-7
     )
 
-    rms, K1_out, dist1_out, K2_out, dist2_out, R, T, E, F = cv2.stereoCalibrate(
-        objectPoints=objpoints,
-        imagePoints1=imgpoints_left,
-        imagePoints2=imgpoints_right,
-        cameraMatrix1=K1.copy(),
-        distCoeffs1=dist1.copy(),
-        cameraMatrix2=K2.copy(),
-        distCoeffs2=dist2.copy(),
-        imageSize=img_size,
-        flags=flags,
-        criteria=criteria
-    )
+    def fit(o, l, r):
+        rms, _, _, _, _, Rm, T, _, _ = cv2.stereoCalibrate(
+            objectPoints=o,
+            imagePoints1=l,
+            imagePoints2=r,
+            cameraMatrix1=K1.copy(),
+            distCoeffs1=dist1.copy(),
+            cameraMatrix2=K2.copy(),
+            distCoeffs2=dist2.copy(),
+            imageSize=img_size,
+            flags=flags,
+            criteria=criteria
+        )
+        return Rm, T.reshape(3, 1), rms
 
-    T = T.reshape(3, 1)
+    def per_image_errors(o, l, r, Rm, T):
+        errs = []
+        for oi, li, ri in zip(o, l, r):
+            _, rv, tv = cv2.solvePnP(oi, li, K1, dist1)
+            Rw, _ = cv2.Rodrigues(rv)
+            proj, _ = cv2.projectPoints(oi, Rm @ Rw, Rm @ tv + T, K2, dist2)
+            errs.append(float(np.sqrt(((proj.reshape(-1, 2) - ri) ** 2).sum(1).mean())))
+        return np.asarray(errs)
+
+    gate_stats = {"repaired": [], "dropped": []}
+    o = list(objpoints)
+    l = list(imgpoints_left)
+    r = list(imgpoints_right)
+    group_ids = list(range(1, len(o) + 1))
+
+    R, T, rms = fit(o, l, r)
+
+    for _ in range(3):
+        errs = per_image_errors(o, l, r, R, T)
+        med = float(np.median(errs))
+        bad = [k for k, e in enumerate(errs) if e > max(3.0, 6.0 * med)]
+        if not bad:
+            break
+
+        keep = []
+        for k in range(len(o)):
+            if k not in bad:
+                keep.append(k)
+                continue
+
+            ri_flip = r[k][::-1].copy()
+            _, rv, tv = cv2.solvePnP(o[k], l[k], K1, dist1)
+            Rw, _ = cv2.Rodrigues(rv)
+            proj, _ = cv2.projectPoints(o[k], R @ Rw, R @ tv + T, K2, dist2)
+            e_flip = float(np.sqrt(((proj.reshape(-1, 2) - ri_flip) ** 2).sum(1).mean()))
+
+            if e_flip < 1.5:
+                r[k] = ri_flip
+                gate_stats["repaired"].append(group_ids[k])
+                keep.append(k)
+                print(
+                    f"⚠️ 组#{group_ids[k]}: 左右角点疑似 180° 翻转，"
+                    f"已自动倒序找回（{errs[k]:.1f} -> {e_flip:.2f} px）"
+                )
+            else:
+                gate_stats["dropped"].append(group_ids[k])
+                print(
+                    f"⚠️ 组#{group_ids[k]}: 重投影误差 {errs[k]:.1f} px"
+                    f"（倒序后 {e_flip:.1f} px 仍差），已剔除"
+                )
+
+        o = [o[k] for k in keep]
+        l = [l[k] for k in keep]
+        r = [r[k] for k in keep]
+        group_ids = [group_ids[k] for k in keep]
+        R, T, rms = fit(o, l, r)
 
     print("\n" + "=" * 70)
-    print("空气+玻璃双目标定 R/T 结果")
+    print("空气+玻璃双目标定 R/T 结果（含逐图离群门控）")
     print("=" * 70)
     print(f"Stereo RMS reprojection error = {rms:.6f} px")
+    print(f"角点翻转找回组: {gate_stats['repaired'] if gate_stats['repaired'] else '无'}；"
+          f"剔除组: {gate_stats['dropped'] if gate_stats['dropped'] else '无'}")
     print("R_glass =")
     print(R)
     print("T_glass_cm =")
     print(T)
     print(f"baseline_glass = {np.linalg.norm(T):.6f} cm")
 
-    return R, T, rms
+    if baseline_expect_cm is not None:
+        b = float(np.linalg.norm(T))
+        if abs(b - baseline_expect_cm) / baseline_expect_cm > 0.10:
+            print(
+                f"⚠️ 基线 {b:.4f} cm 与物理参照 {baseline_expect_cm:.4f} cm 偏差超过 10%，"
+                "标定结果可疑，建议重新采集！"
+            )
+        else:
+            print(f"✅ 基线与物理参照 {baseline_expect_cm:.4f} cm 偏差 "
+                  f"{abs(b - baseline_expect_cm):.4f} cm，正常。")
+
+    return R, T, rms, gate_stats
 
 
 def build_rectify_and_save_npz(K1, dist1, K2, dist2, R, T_cm, img_size, swap_air_params_lr):
@@ -712,6 +802,7 @@ def write_calibration_report(
     baseline_cm,
     fx_rect,
     swap_air_params_lr,
+    gate_stats=None,
 ):
     """
     把本次标定的完整信息写成 markdown 报告归档到 RUN_DIR。
@@ -724,6 +815,13 @@ def write_calibration_report(
         stereo_rms_text = "未重估（RECALIBRATE_STEREO_RT=False，沿用空气 R/T）"
     else:
         stereo_rms_text = f"{stereo_rms:.6f} px"
+
+    if gate_stats is None:
+        gate_stats = {"repaired": [], "dropped": []}
+    gate_text = (
+        f"- 角点 180° 翻转自动找回组: {gate_stats['repaired'] if gate_stats['repaired'] else '无'}\n"
+        f"- 门控剔除组: {gate_stats['dropped'] if gate_stats['dropped'] else '无'}"
+    )
 
     lines = [
         "# 空气+玻璃标定报告",
@@ -757,6 +855,7 @@ def write_calibration_report(
         f"- 单目固定 K RMS（左）: {rms_left:.6f} px",
         f"- 单目固定 K RMS（右）: {rms_right:.6f} px",
         f"- 双目 stereo RMS: {stereo_rms_text}",
+        gate_text,
         "",
         "## 最终参数",
         "",
@@ -1039,14 +1138,15 @@ def main():
     )
 
     # =====================================================
-    # Step 3：处理双目 R/T
+    # Step 3：处理双目 R/T（带逐图离群门控）
     # =====================================================
     stereo_rms = None
+    gate_stereo = None
 
     if RECALIBRATE_STEREO_RT:
         # 推荐：用玻璃下角点重新估计 R/T。
         # 因为 SQUARE_SIZE 是 cm，所以这里 T_glass_cm 单位就是 cm。
-        R_use, T_use_cm, stereo_rms = stereo_calibrate_fixed_intrinsic(
+        R_use, T_use_cm, stereo_rms, gate_stereo = stereo_calibrate_fixed_intrinsic(
             objpoints=objpoints,
             imgpoints_left=imgpoints_left,
             imgpoints_right=imgpoints_right,
@@ -1054,7 +1154,8 @@ def main():
             dist1=dist1_glass,
             K2=K2_glass,
             dist2=dist2_glass,
-            img_size=IMG_SIZE
+            img_size=IMG_SIZE,
+            baseline_expect_cm=float(np.linalg.norm(convert_matlab_T_to_cm(T_air_raw)))
         )
     else:
         # 只更新畸变，沿用空气中 R/T。
@@ -1102,6 +1203,7 @@ def main():
         baseline_cm=baseline_cm,
         fx_rect=fx_rect,
         swap_air_params_lr=swap_air_params_lr,
+        gate_stats=gate_stereo,
     )
 
     # =====================================================

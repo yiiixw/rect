@@ -115,6 +115,16 @@ RUN_DEPTH_AFTER_CALIB = True
 # 测深是否使用 WLS
 USE_WLS = True
 
+# 深度规范修正（平板玻璃折射：虚拟深度 -> 真实深度）：
+# 固定空气 K 的水下标定得到的是折射"虚拟深度" Z_v = c + Z_真实/n_w（近轴精确成立，
+# 数据上表现为基线仍等于物理值、RMS 极好，但读数系统性地偏小约 1/1.33）。
+# 测深端按 Z_真实 = WATER_REFRACTIVE_INDEX * (Z_v - WATER_PORT_OFFSET_CM) 还原。
+# offset 为相机光心到玻璃外表面的等效空气光程（外壳深度 + 玻璃厚/1.5），
+# 量级 1~2cm，默认 1.1（由 20260908_015940 run 的 9 个已知距离样本拟合）。
+# 该修正写入 npz 的 depth_scale / depth_offset_cm 键，由 stereo_depth_core 应用。
+WATER_REFRACTIVE_INDEX = 1.3333
+WATER_PORT_OFFSET_CM = 1.1
+
 
 np.set_printoptions(
     precision=17,
@@ -230,10 +240,25 @@ def enhance_for_underwater_chessboard(gray):
     return clahe.apply(gray)
 
 
+def canonicalize_corner_order(corners):
+    """
+    消除棋盘格角点的 180° 起点歧义。
+
+    8x11 内角点网格本身 180° 旋转对称，检测器可能从任一对角返回角点链。
+    单目标定对此无感（等价于板的另一种合法位姿），但左右视图起点不一致时
+    双目逐点对应全错，会把 stereoCalibrate 整体拖歪（曾两次导致基线塌缩）。
+    规定角点链首角在图像上方，左右两视图统一规范后即安全。
+    """
+    if corners[0, 1] > corners[-1, 1]:
+        return corners[::-1].copy()
+    return corners
+
+
 def detect_corners(img_bgr, pattern_size):
     """
     检测水下棋盘格角点。
     优先 findChessboardCornersSB，失败后传统方法兜底。
+    返回前统一角点链方向（消除 180° 起点歧义）。
     """
     gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
     gray_eq = enhance_for_underwater_chessboard(gray)
@@ -246,7 +271,7 @@ def detect_corners(img_bgr, pattern_size):
 
     if ret:
         corners = corners.astype(np.float32)
-        return True, corners.reshape(-1, 2)
+        return True, canonicalize_corner_order(corners.reshape(-1, 2))
 
     flags = (
         cv2.CALIB_CB_ADAPTIVE_THRESH
@@ -268,7 +293,7 @@ def detect_corners(img_bgr, pattern_size):
             zeroZone=(-1, -1),
             criteria=criteria
         )
-        return True, corners.reshape(-1, 2)
+        return True, canonicalize_corner_order(corners.reshape(-1, 2))
 
     return False, None
 
@@ -507,12 +532,18 @@ def stereo_calibrate_fixed_intrinsic(
     dist1,
     K2,
     dist2,
-    img_size
+    img_size,
+    baseline_expect_cm=None
 ):
     """
-    固定左右 K/dist，只最大似然估计水下双目 R/T。
+    固定左右 K/dist，只最大似然估计水下双目 R/T。带逐图离群门控。
 
-    因为 objpoints 单位是 cm，所以 T 单位也是 cm。
+    单张图左右角点对应错乱（典型为 180° 起点翻转）会把最小二乘整体拖歪
+    （曾导致基线 2.9->1.9 cm、RMS 22 px），因此门控流程为：
+    拟合 -> 逐图重投影误差检验 -> 坏组尝试角点倒序找回 -> 找不回则剔除 -> 重拟合，
+    迭代到无坏组为止。
+
+    baseline_expect_cm：传入玻璃阶段基线作为物理参照，偏差过大时告警。
     """
     flags = cv2.CALIB_FIX_INTRINSIC
 
@@ -522,32 +553,102 @@ def stereo_calibrate_fixed_intrinsic(
         1e-7
     )
 
-    rms, K1_out, dist1_out, K2_out, dist2_out, R, T, E, F = cv2.stereoCalibrate(
-        objectPoints=objpoints,
-        imagePoints1=imgpoints_left,
-        imagePoints2=imgpoints_right,
-        cameraMatrix1=K1.copy(),
-        distCoeffs1=dist1.copy(),
-        cameraMatrix2=K2.copy(),
-        distCoeffs2=dist2.copy(),
-        imageSize=img_size,
-        flags=flags,
-        criteria=criteria
-    )
+    def fit(o, l, r):
+        rms, _, _, _, _, Rm, T, _, _ = cv2.stereoCalibrate(
+            objectPoints=o,
+            imagePoints1=l,
+            imagePoints2=r,
+            cameraMatrix1=K1.copy(),
+            distCoeffs1=dist1.copy(),
+            cameraMatrix2=K2.copy(),
+            distCoeffs2=dist2.copy(),
+            imageSize=img_size,
+            flags=flags,
+            criteria=criteria
+        )
+        return Rm, T.reshape(3, 1), rms
 
-    T = T.reshape(3, 1)
+    def per_image_errors(o, l, r, Rm, T):
+        errs = []
+        for oi, li, ri in zip(o, l, r):
+            _, rv, tv = cv2.solvePnP(oi, li, K1, dist1)
+            Rw, _ = cv2.Rodrigues(rv)
+            proj, _ = cv2.projectPoints(oi, Rm @ Rw, Rm @ tv + T, K2, dist2)
+            errs.append(float(np.sqrt(((proj.reshape(-1, 2) - ri) ** 2).sum(1).mean())))
+        return np.asarray(errs)
+
+    gate_stats = {"repaired": [], "dropped": []}
+    o = list(objpoints)
+    l = list(imgpoints_left)
+    r = list(imgpoints_right)
+    group_ids = list(range(1, len(o) + 1))
+
+    R, T, rms = fit(o, l, r)
+
+    for _ in range(3):
+        errs = per_image_errors(o, l, r, R, T)
+        med = float(np.median(errs))
+        bad = [k for k, e in enumerate(errs) if e > max(3.0, 6.0 * med)]
+        if not bad:
+            break
+
+        keep = []
+        for k in range(len(o)):
+            if k not in bad:
+                keep.append(k)
+                continue
+
+            ri_flip = r[k][::-1].copy()
+            _, rv, tv = cv2.solvePnP(o[k], l[k], K1, dist1)
+            Rw, _ = cv2.Rodrigues(rv)
+            proj, _ = cv2.projectPoints(o[k], R @ Rw, R @ tv + T, K2, dist2)
+            e_flip = float(np.sqrt(((proj.reshape(-1, 2) - ri_flip) ** 2).sum(1).mean()))
+
+            if e_flip < 1.5:
+                r[k] = ri_flip
+                gate_stats["repaired"].append(group_ids[k])
+                keep.append(k)
+                print(
+                    f"⚠️ 组#{group_ids[k]}: 左右角点疑似 180° 翻转，"
+                    f"已自动倒序找回（{errs[k]:.1f} -> {e_flip:.2f} px）"
+                )
+            else:
+                gate_stats["dropped"].append(group_ids[k])
+                print(
+                    f"⚠️ 组#{group_ids[k]}: 重投影误差 {errs[k]:.1f} px"
+                    f"（倒序后 {e_flip:.1f} px 仍差），已剔除"
+                )
+
+        o = [o[k] for k in keep]
+        l = [l[k] for k in keep]
+        r = [r[k] for k in keep]
+        group_ids = [group_ids[k] for k in keep]
+        R, T, rms = fit(o, l, r)
 
     print("\n" + "=" * 70)
-    print("水下双目标定 R/T 结果")
+    print("水下双目标定 R/T 结果（含逐图离群门控）")
     print("=" * 70)
     print(f"Stereo RMS reprojection error = {rms:.6f} px")
+    print(f"角点翻转找回组: {gate_stats['repaired'] if gate_stats['repaired'] else '无'}；"
+          f"剔除组: {gate_stats['dropped'] if gate_stats['dropped'] else '无'}")
     print("R_underwater =")
     print(R)
     print("T_underwater_cm =")
     print(T)
     print(f"baseline_underwater = {np.linalg.norm(T):.6f} cm")
 
-    return R, T, rms
+    if baseline_expect_cm is not None:
+        b = float(np.linalg.norm(T))
+        if abs(b - baseline_expect_cm) / baseline_expect_cm > 0.10:
+            print(
+                f"⚠️ 基线 {b:.4f} cm 与物理参照 {baseline_expect_cm:.4f} cm 偏差超过 10%，"
+                "标定结果可疑，建议重新采集！"
+            )
+        else:
+            print(f"✅ 基线与物理参照 {baseline_expect_cm:.4f} cm 偏差 "
+                  f"{abs(b - baseline_expect_cm):.4f} cm，正常。")
+
+    return R, T, rms, gate_stats
 
 
 def build_rectify_and_save_npz(K1, dist1, K2, dist2, R, T_cm, img_size):
@@ -606,6 +707,10 @@ def build_rectify_and_save_npz(K1, dist1, K2, dist2, R, T_cm, img_size):
         swap_capture_halves=np.asarray(SWAP_CAPTURE_HALVES, dtype=np.bool_),
         medium=np.asarray("underwater"),
         source_param=np.asarray(str(GLASS_NPZ_INPUT)),
+
+        # 深度规范修正（虚拟深度 -> 真实深度），stereo_depth_core 读取应用
+        depth_scale=np.asarray(WATER_REFRACTIVE_INDEX, dtype=np.float64),
+        depth_offset_cm=np.asarray(WATER_PORT_OFFSET_CM, dtype=np.float64),
     )
     np.savez(str(UNDERWATER_NPZ_OUTPUT), **npz_data)
     np.savez(str(RUN_DIR / UNDERWATER_NPZ_OUTPUT.name), **npz_data)
@@ -620,6 +725,7 @@ def build_rectify_and_save_npz(K1, dist1, K2, dist2, R, T_cm, img_size):
     print(f"fx_rect = {fx_rect:.6f} px")
     print(f"rectify_alpha = {RECTIFY_ALPHA}")
     print(f"swap_capture_halves = {SWAP_CAPTURE_HALVES}")
+    print(f"深度规范修正: Z_真实 = {WATER_REFRACTIVE_INDEX} * (Z_raw - {WATER_PORT_OFFSET_CM})")
     print(f"理论 Z=30cm 时 disparity ≈ {fx_rect * baseline_cm / 30.0:.6f} px")
     print(f"理论 Z=50cm 时 disparity ≈ {fx_rect * baseline_cm / 50.0:.6f} px")
     print(f"理论 Z=100cm 时 disparity ≈ {fx_rect * baseline_cm / 100.0:.6f} px")
@@ -637,6 +743,7 @@ def write_calibration_report(
     K1, K2, dist1, dist2, R, T_cm,
     baseline_cm,
     fx_rect,
+    gate_stats=None,
 ):
     """
     把本次标定的完整信息写成 markdown 报告归档到 RUN_DIR。
@@ -649,6 +756,13 @@ def write_calibration_report(
         stereo_rms_text = "未重估（RECALIBRATE_STEREO_RT=False，沿用玻璃 R/T）"
     else:
         stereo_rms_text = f"{stereo_rms:.6f} px"
+
+    if gate_stats is None:
+        gate_stats = {"repaired": [], "dropped": []}
+    gate_text = (
+        f"- 角点 180° 翻转自动找回组: {gate_stats['repaired'] if gate_stats['repaired'] else '无'}\n"
+        f"- 门控剔除组: {gate_stats['dropped'] if gate_stats['dropped'] else '无'}"
+    )
 
     lines = [
         "# 水下标定报告",
@@ -668,6 +782,8 @@ def write_calibration_report(
         f"- RECALIBRATE_STEREO_RT = {RECALIBRATE_STEREO_RT}",
         f"- RECTIFY_ALPHA = {RECTIFY_ALPHA}",
         f"- USE_WLS = {USE_WLS}",
+        f"- WATER_REFRACTIVE_INDEX = {WATER_REFRACTIVE_INDEX}",
+        f"- WATER_PORT_OFFSET_CM = {WATER_PORT_OFFSET_CM}",
         "",
         "## 采集统计",
         "",
@@ -680,6 +796,7 @@ def write_calibration_report(
         f"- 单目固定 K RMS（左）: {rms_left:.6f} px",
         f"- 单目固定 K RMS（右）: {rms_right:.6f} px",
         f"- 双目 stereo RMS: {stereo_rms_text}",
+        gate_text,
         "",
         "## 最终参数",
         "",
@@ -695,6 +812,12 @@ def write_calibration_report(
         f"- baseline = {baseline_cm:.6f} cm",
         f"- fx_rect = {fx_rect:.6f} px",
         f"- swap_capture_halves = {SWAP_CAPTURE_HALVES}",
+        "",
+        "## 深度规范修正",
+        "",
+        f"- Z_真实 = {WATER_REFRACTIVE_INDEX} × (Z_raw − {WATER_PORT_OFFSET_CM} cm)",
+        "- 说明: 固定空气 K 的水下标定输出折射虚拟深度 Z_v = c + Z/n_w，",
+        "  测深端（stereo_depth_core）读取 npz 的 depth_scale/depth_offset_cm 自动还原。",
         "",
         "## 理论视差核对",
         "",
@@ -924,11 +1047,12 @@ def main():
         camera_name="RIGHT"
     )
 
-    # Step 3：重新估计水下 R/T
+    # Step 3：重新估计水下 R/T（带逐图离群门控）
     stereo_rms = None
+    gate_stereo = None
 
     if RECALIBRATE_STEREO_RT:
-        R_use, T_use_cm, stereo_rms = stereo_calibrate_fixed_intrinsic(
+        R_use, T_use_cm, stereo_rms, gate_stereo = stereo_calibrate_fixed_intrinsic(
             objpoints=objpoints,
             imgpoints_left=imgpoints_left,
             imgpoints_right=imgpoints_right,
@@ -936,7 +1060,8 @@ def main():
             dist1=dist1_underwater,
             K2=K2_underwater,
             dist2=dist2_underwater,
-            img_size=IMG_SIZE
+            img_size=IMG_SIZE,
+            baseline_expect_cm=float(np.linalg.norm(T_glass_cm))
         )
     else:
         R_use = R_glass.copy()
@@ -975,6 +1100,7 @@ def main():
         T_cm=T_use_cm,
         baseline_cm=baseline_cm,
         fx_rect=fx_rect,
+        gate_stats=gate_stereo,
     )
 
     # Step 5：直接启动水下测深

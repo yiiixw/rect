@@ -58,7 +58,7 @@ matlab.mat (MATLAB stereoParameters)
 4. **固定 K 的标定策略**：玻璃/水下阶段只重估畸变（`CALIB_FIX_FOCAL_LENGTH | CALIB_FIX_PRINCIPAL_POINT | CALIB_FIX_K4/K5/K6`），焦距光心继承上一阶段。这是项目核心方法论，勿随意放开。
 5. **npz 契约**：测深核心要求 npz 必含 `map1x/map1y/map2x/map2y/Q/image_size`，缺一即抛 KeyError。新增字段可以，删字段不行。
 6. **相机**：`CAMERA_ID=0`，`cv2.CAP_DSHOW`（Windows 专用），单目尺寸 640x480（`IMG_SIZE=(640,480)`，OpenCV 宽高序）。
-7. **棋盘格**：`PATTERN_SIZE=(8,11)` 是**内角点数**（横向×纵向），不是格子数；检测时先 `findChessboardCornersSB`（EXHAUSTIVE|ACCURACY），失败用传统方法+`cornerSubPix` 兜底；灰度先过 CLAHE 增强对抗玻璃反光/水下低对比。
+7. **棋盘格**：`PATTERN_SIZE=(8,11)` 是**内角点数**（横向×纵向），不是格子数；检测时先 `findChessboardCornersSB`（EXHAUSTIVE|ACCURACY），失败用传统方法+`cornerSubPix` 兜底；灰度先过 CLAHE 增强对抗玻璃反光/水下低对比；**检测后必须过 `canonicalize_corner_order` 统一角点链方向**（8×11 网格 180° 旋转对称，左右视图起点不一致会破坏双目对应、拖垮基线）。
 8. **中文路径**：脚本和图像目录含中文，写图必须走 `imwrite_unicode`（`cv2.imencode` + `tofile`），不要直接 `cv2.imwrite`。
 
 ## 后续规则记录（持续追加）
@@ -69,3 +69,8 @@ matlab.mat (MATLAB stereoParameters)
 - 2026-09-08：**历史数据手工规整**：过去的 run 全部并入 `calibration_history/`（glass×3、underwater×2，含被污染的 21:35 水下 run 及其事后诊断报告、从 git 初始提交找回的已废弃玻璃版）；旧目录 `glass_calibration_images/`、`underwater_calibration_images/` 已删除，当天第一条规则中的原图归档路径由本机制取代。run 索引见 `calibration_history/README.md`。
 - 2026-09-08：**调用 subagent（Agent 工具）并行执行时，并行数不得超过 3**——模型 API 有限速，超并行会触发 429。大任务按 3+2 分波执行（例：论文翻译即分两波）。
 - 2026-09-08：**测深阶段 s 键采样**：rect.py / rect_water.py 标定后进入测深时按 s，把当前帧原始左右图 + 该点测量值（disp/X/Y/Z/D）+ tkinter 弹窗输入的真实深度保存为一条验证样本，落在本次 run 目录 `depth_samples/`（`left_XXX.png`、`right_XXX.png` + `depth_samples.json` 追加记录，含误差字段）。无待测点或视差无效仅警告不保存；弹窗取消则整条放弃。实现为两脚本各自的 `SamplingStereoDepthRunner`（覆写 run() 加 s 分支），`stereo_depth_core.py` 保持不动。
+- 2026-09-08：**水下测深三重修复**（015940 run 离线修复验证，13-39cm 十样本 RMS 0.94cm）：
+  1. **角点 180° 翻转根治**：检测后 `canonicalize_corner_order` 统一角点链方向；双目拟合升级为"拟合→逐图误差门控→坏组尝试倒序找回→不可修剔除→重拟合"迭代（`stereo_calibrate_fixed_intrinsic` 返回 gate_stats 并写入报告，基线偏离物理参照 >10% 告警）；
+  2. **深度规范修正**：固定空气 K 的水下标定输出折射虚拟深度 Z_v = c + Z_真实/n_w（近轴精确，数据上无法与真实深度规范区分——焦距扫描证实数据内无焦距信号，论文 §3.3 的 ×1.33 是物理先验而非拟合结果）。水下 npz 写入 `depth_scale=1.3333`/`depth_offset_cm≈1.1`（rect_water.py 配置 `WATER_REFRACTIVE_INDEX`/`WATER_PORT_OFFSET_CM`），`stereo_depth_core.measure_depth` 读取并按 Z_真实=scale×(Z_raw−offset) 还原；空气/玻璃 npz 无此二键，恒等不受影响；
+  3. **numDisparities 128→192**：水下可测下限 12.2→8.1cm（空气 9→6.0cm）。
+  附：`1.py` 的自由焦距路线实测不稳定（尺度简并，fx 漂移 ×1.5、RMS 恶化），勿作为修复手段。

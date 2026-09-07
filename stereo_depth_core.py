@@ -93,6 +93,12 @@ class StereoDepthRunner:
             else None
         )
 
+        # 深度规范修正（水下 npz 专用；空气 npz 无这两个键，恒等）：
+        # 固定空气 K 的水下标定输出的是折射"虚拟深度" Z_v = c + Z_真实/n_w，
+        # 测深端按 Z_真实 = depth_scale * (Z_v - depth_offset_cm) 还原。
+        self.depth_scale = float(np.asarray(data["depth_scale"])) if "depth_scale" in data else 1.0
+        self.depth_offset_cm = float(np.asarray(data["depth_offset_cm"])) if "depth_offset_cm" in data else 0.0
+
         print(f"✅ 已加载参数文件: {self.param_file}")
         print(f"✅ 单目校正尺寸: {self.left_width} x {self.height}")
         if self.baseline_cm is not None:
@@ -106,10 +112,14 @@ class StereoDepthRunner:
             print(f"参数生成时 SWAP_CAPTURE_HALVES = {self.swap_capture_halves_in_params}")
             if self.swap_capture_halves_in_params != self.swap_capture_halves:
                 print("⚠️ 当前运行时 SWAP_CAPTURE_HALVES 和参数生成时不一致，画面可能会错位或花屏。")
+        if self.depth_scale != 1.0 or self.depth_offset_cm != 0.0:
+            print(f"✅ 深度规范修正: Z_真实 = {self.depth_scale:.4f} * (Z_raw - {self.depth_offset_cm:.3f} cm)")
 
     def create_matcher(self):
         min_disp = 0
-        num_disp = 16 * 8
+        # num_disp=192（12*16）：水下 fb≈1562 时视差上限 191px，
+        # 对应可测深度下限 ≈8cm；=128 时下限只有 ≈12cm，更近的目标会失配。
+        num_disp = 16 * 12
         block_size = 5
 
         self.left_matcher = cv2.StereoSGBM_create(
@@ -234,7 +244,11 @@ class StereoDepthRunner:
         X = float(np.median(pts_region[valid, 0]))
         Y = float(np.median(pts_region[valid, 1]))
         Z_raw = float(np.median(pts_region[valid, 2]))
-        Z = abs(Z_raw)
+
+        # 深度规范修正（空气 npz 为恒等变换；水下把折射虚拟深度还原为真实深度）。
+        X = self.depth_scale * X
+        Y = self.depth_scale * Y
+        Z = abs(self.depth_scale * (abs(Z_raw) - self.depth_offset_cm))
         distance = float(np.sqrt(X * X + Y * Y + Z * Z))
 
         if Z <= 0 or Z > 1000:
