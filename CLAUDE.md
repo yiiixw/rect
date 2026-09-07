@@ -37,7 +37,7 @@ matlab.mat (MATLAB stereoParameters)
 
 ### rect.py — 空气+玻璃标定
 1. 读 `stereo_params_plain.mat` 拿空气 K/dist/R/T；
-2. 实时采集（按 `s` 缓存并落盘原图到 `glass_calibration_images/<启动时间戳>/`，`q` 结束后统一检测角点，避免采集卡顿）；
+2. 实时采集（按 `s` 缓存并落盘原图，`q` 结束后统一检测角点，避免采集卡顿）；
 3. **固定焦距 fx/fy 和光心 cx/cy**，只重估玻璃引起的左右畸变 dist（5 参数 [k1,k2,p1,p2,k3]）；
 4. `RECALIBRATE_STEREO_RT=True` 时用 `CALIB_FIX_INTRINSIC` 重估双目 R/T；
 5. `stereoRectify` 生成 map1x/map1y/map2x/map2y/Q，保存 `stereo_params_updated_with_glass.npz`（同时存 `swap_lr`、`swap_capture_halves` 等一致性标记）；
@@ -45,6 +45,10 @@ matlab.mat (MATLAB stereoParameters)
 
 ### rect_water.py — 水下标定
 与 rect.py 同构，差异：初值来自玻璃 npz（无 MATLAB 单位转换与 swap_lr 逻辑）；CLAHE clipLimit=2.5；`RECTIFY_ALPHA=0`（裁黑边求视差稳定）；标定迭代数更多；**不做 1.33 经验缩放**（MLE 直接重估水下 dist 再重估 R/T）。采集/归档模式与 rect.py 统一（见下方规则）。
+
+### 标定历史归档（两脚本共用机制）
+
+每次运行把本次标定的全部产物写入 `calibration_history/<glass|underwater>/<启动时间戳>/`：`images/{left,right,pair}/`（原图，gitignore）、角点 npz（含 `left_files`/`right_files` 溯源键）、参数 npz 快照、`calibration_report.md`（配置快照、采集统计、各步 RMS、最终参数）。**只增不覆盖**。根目录下的 npz 文件保持"最新版"语义继续覆盖，测深入口按固定路径读它们；回滚到某次历史标定 = 把该 run 目录下的参数 npz 复制回根目录（或改 `PARAM_FILE`）。
 
 ## 硬性约定（改动前必须理解）
 
@@ -61,3 +65,5 @@ matlab.mat (MATLAB stereoParameters)
 
 - 2026-09-07：初始化仓库（本地 git 管理，无远程）。`left/`、`right/`、`pair/`、`underwater_calibration_images/` 图像数据不入库；标定参数 npz/mat 和角点 npz 保留入库以便回滚到已验证的标定结果。
 - 2026-09-08：rect.py 与 rect_water.py 的采集/归档模式已统一：采集阶段只缓存+落盘原图（不做实时角点检测），`q` 后统一批量检测、左右都成功才计入标定；原图均按程序启动时间戳归档到 `<glass|underwater>_calibration_images/<时间戳>/{left,right,pair}/`，目录不入库。
+- 2026-09-08：**标定历史归档机制**：每次标定完整产物（原图/角点/参数/报告）写入 `calibration_history/<stage>/<时间戳>/`，只增不覆盖（起因：水下标定曾被一张角点 180° 翻转的坏图污染且无法溯源到具体图片）。根目录 npz 仍是"最新版"语义；角点 npz 新增 `left_files`/`right_files` 键关联原图文件名；`calibration_history/**/images/` 不入库，其余入库。
+- 2026-09-08：**调用 subagent（Agent 工具）并行执行时，并行数不得超过 3**——模型 API 有限速，超并行会触发 429。大任务按 3+2 分波执行（例：论文翻译即分两波）。

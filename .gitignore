@@ -13,6 +13,9 @@ pair/
 glass_calibration_images/
 underwater_calibration_images/
 
+# 历史标定归档：只忽略原图，角点/参数 npz 与标定报告入库
+calibration_history/**/images/
+
 # 水下校准模型.pdf 的提取产物（原件已入库，可随时重新提取）
 _pdf_figs/
 _pdf_pages/

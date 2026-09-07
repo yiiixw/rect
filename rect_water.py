@@ -33,10 +33,14 @@ from stereo_depth_core import StereoDepthRunner
 # =========================================================
 SCRIPT_DIR = Path(__file__).resolve().parent
 
-# 每次程序启动都使用独立时间戳目录保存水下标定原图。
+# 每次程序启动都用独立时间戳目录归档本次标定的全部产物
+# （原图 / 角点 npz / 参数 npz / 标定报告），只增不覆盖，便于追溯历史。
+# 根目录下的 UNDERWATER_NPZ_OUTPUT / UNDERWATER_CORNERS_OUTPUT 仍是"最新版"语义（继续覆盖），
+# 供测距脚本按固定路径读取。
 PROGRAM_START_TIMESTAMP = datetime.now().strftime("%Y%m%d_%H%M%S")
-UNDERWATER_IMAGES_ROOT = SCRIPT_DIR / "underwater_calibration_images"
-UNDERWATER_IMAGES_OUTPUT = UNDERWATER_IMAGES_ROOT / PROGRAM_START_TIMESTAMP
+HISTORY_ROOT = SCRIPT_DIR / "calibration_history" / "underwater"
+RUN_DIR = HISTORY_ROOT / PROGRAM_START_TIMESTAMP
+UNDERWATER_IMAGES_OUTPUT = RUN_DIR / "images"
 
 # 输入：你现在已经测玻璃没问题的参数
 GLASS_NPZ_INPUT = SCRIPT_DIR / "stereo_params_updated_with_glass.npz"
@@ -62,7 +66,7 @@ SQUARE_SIZE = 1.0
 # =========================================================
 # 3. 摄像头配置
 # =========================================================
-CAMERA_ID = 0
+CAMERA_ID = 1
 FRAME_WIDTH = 1280
 FRAME_HEIGHT = 480
 
@@ -270,7 +274,10 @@ def collect_underwater_corners():
     objpoints = []
     imgpoints_left = []
     imgpoints_right = []
-    cached_pairs = []
+    cached_pairs = []      # (left, right, left文件名, right文件名)
+    dropped_indices = []   # 角点检测失败被丢弃的缓存组编号（从 1 开始）
+    valid_left_files = []
+    valid_right_files = []
 
     left_output = UNDERWATER_IMAGES_OUTPUT / "left"
     right_output = UNDERWATER_IMAGES_OUTPUT / "right"
@@ -347,7 +354,7 @@ def collect_underwater_corners():
             ok_save_pair = imwrite_unicode(pair_path, pair_raw)
 
             if ok_save_l and ok_save_r and ok_save_pair:
-                cached_pairs.append((left.copy(), right.copy()))
+                cached_pairs.append((left.copy(), right.copy(), left_path.name, right_path.name))
                 idx = save_idx
                 print(f"✅ 已缓存并落盘第 {idx} 组水下原图")
             else:
@@ -360,7 +367,7 @@ def collect_underwater_corners():
     cv2.destroyAllWindows()
 
     print(f"\n开始统一检测 {len(cached_pairs)} 组缓存图像的棋盘格角点...")
-    for pair_idx, (left, right) in enumerate(cached_pairs, start=1):
+    for pair_idx, (left, right, left_name, right_name) in enumerate(cached_pairs, start=1):
         ok_l, corners_l = detect_corners(left, PATTERN_SIZE)
         ok_r, corners_r = detect_corners(right, PATTERN_SIZE)
 
@@ -368,8 +375,11 @@ def collect_underwater_corners():
             objpoints.append(objp.copy())
             imgpoints_left.append(corners_l.astype(np.float32).copy())
             imgpoints_right.append(corners_r.astype(np.float32).copy())
+            valid_left_files.append(left_name)
+            valid_right_files.append(right_name)
             print(f"✅ 第 {pair_idx}/{len(cached_pairs)} 组：左右角点检测成功")
         else:
+            dropped_indices.append(pair_idx)
             print(
                 f"⚠️ 第 {pair_idx}/{len(cached_pairs)} 组：已丢弃，"
                 f"left={ok_l}, right={ok_r}"
@@ -389,20 +399,31 @@ def collect_underwater_corners():
     imgpoints_left = [p.astype(np.float32) for p in imgpoints_left]
     imgpoints_right = [p.astype(np.float32) for p in imgpoints_right]
 
-    np.savez(
-        str(UNDERWATER_CORNERS_OUTPUT),
+    corners_data = dict(
         objpoints=np.asarray(objpoints, dtype=np.float32),
         imgpoints_left=np.asarray(imgpoints_left, dtype=np.float32),
         imgpoints_right=np.asarray(imgpoints_right, dtype=np.float32),
+        # 每组角点对应的原图文件名（images/{left,right}/ 下），用于溯源。
+        left_files=np.asarray(valid_left_files),
+        right_files=np.asarray(valid_right_files),
         pattern_size=np.asarray(PATTERN_SIZE, dtype=np.int32),
         square_size=np.asarray(SQUARE_SIZE, dtype=np.float32),
         image_size=np.asarray(IMG_SIZE, dtype=np.int32),
     )
+    np.savez(str(UNDERWATER_CORNERS_OUTPUT), **corners_data)
+    np.savez(str(RUN_DIR / UNDERWATER_CORNERS_OUTPUT.name), **corners_data)
 
     print(f"✅ 已保存水下角点数据: {UNDERWATER_CORNERS_OUTPUT}")
+    print(f"✅ 已归档本次角点数据: {RUN_DIR / UNDERWATER_CORNERS_OUTPUT.name}")
     print(f"✅ 已保存水下标定原图: {UNDERWATER_IMAGES_OUTPUT}")
 
-    return objpoints, imgpoints_left, imgpoints_right
+    capture_stats = {
+        "cached": len(cached_pairs),
+        "valid": len(objpoints),
+        "dropped": dropped_indices,
+    }
+
+    return objpoints, imgpoints_left, imgpoints_right, capture_stats
 
 
 def calibrate_one_camera_fixed_K(objpoints, imgpoints, K_init, dist_init, img_size, camera_name):
@@ -537,9 +558,7 @@ def build_rectify_and_save_npz(K1, dist1, K2, dist2, R, T_cm, img_size):
     baseline_cm = float(np.linalg.norm(T_cm))
     fx_rect = float(P1[0, 0])
 
-    np.savez(
-        str(UNDERWATER_NPZ_OUTPUT),
-
+    npz_data = dict(
         map1x=map1x,
         map1y=map1y,
         map2x=map2x,
@@ -569,11 +588,14 @@ def build_rectify_and_save_npz(K1, dist1, K2, dist2, R, T_cm, img_size):
         medium=np.asarray("underwater"),
         source_param=np.asarray(str(GLASS_NPZ_INPUT)),
     )
+    np.savez(str(UNDERWATER_NPZ_OUTPUT), **npz_data)
+    np.savez(str(RUN_DIR / UNDERWATER_NPZ_OUTPUT.name), **npz_data)
 
     print("\n" + "=" * 70)
     print("✅ 已生成水下立体校正参数")
     print("=" * 70)
-    print(f"保存路径: {UNDERWATER_NPZ_OUTPUT}")
+    print(f"保存路径(最新版): {UNDERWATER_NPZ_OUTPUT}")
+    print(f"归档路径(历史版): {RUN_DIR / UNDERWATER_NPZ_OUTPUT.name}")
     print(f"image_size = {img_size}")
     print(f"baseline_underwater = {baseline_cm:.6f} cm")
     print(f"fx_rect = {fx_rect:.6f} px")
@@ -585,11 +607,93 @@ def build_rectify_and_save_npz(K1, dist1, K2, dist2, R, T_cm, img_size):
     print("Q =")
     print(Q)
 
+    return baseline_cm, fx_rect
+
+
+def write_calibration_report(
+    capture_stats,
+    rms_left,
+    rms_right,
+    stereo_rms,
+    K1, K2, dist1, dist2, R, T_cm,
+    baseline_cm,
+    fx_rect,
+):
+    """
+    把本次标定的完整信息写成 markdown 报告归档到 RUN_DIR。
+    控制台输出用完即丢，报告是唯一的持久化记录。
+    """
+    dropped = capture_stats["dropped"]
+    dropped_text = ", ".join(str(i) for i in dropped) if dropped else "无"
+
+    if stereo_rms is None:
+        stereo_rms_text = "未重估（RECALIBRATE_STEREO_RT=False，沿用玻璃 R/T）"
+    else:
+        stereo_rms_text = f"{stereo_rms:.6f} px"
+
+    lines = [
+        "# 水下标定报告",
+        "",
+        f"- 运行时间戳: {PROGRAM_START_TIMESTAMP}",
+        "- 阶段: 水下（水+玻璃+外壳）",
+        f"- 输入源: {GLASS_NPZ_INPUT}",
+        f"- 归档目录: {RUN_DIR}",
+        "",
+        "## 配置快照",
+        "",
+        f"- PATTERN_SIZE = {PATTERN_SIZE}（内角点数）",
+        f"- SQUARE_SIZE = {SQUARE_SIZE} cm",
+        f"- CAMERA_ID = {CAMERA_ID}",
+        f"- IMG_SIZE = {IMG_SIZE}",
+        f"- SWAP_CAPTURE_HALVES = {SWAP_CAPTURE_HALVES}",
+        f"- RECALIBRATE_STEREO_RT = {RECALIBRATE_STEREO_RT}",
+        f"- RECTIFY_ALPHA = {RECTIFY_ALPHA}",
+        f"- USE_WLS = {USE_WLS}",
+        "",
+        "## 采集统计",
+        "",
+        f"- 缓存组数: {capture_stats['cached']}",
+        f"- 角点检测成功（计入标定）: {capture_stats['valid']}",
+        f"- 被丢弃的组编号: {dropped_text}",
+        "",
+        "## 拟合指标",
+        "",
+        f"- 单目固定 K RMS（左）: {rms_left:.6f} px",
+        f"- 单目固定 K RMS（右）: {rms_right:.6f} px",
+        f"- 双目 stereo RMS: {stereo_rms_text}",
+        "",
+        "## 最终参数",
+        "",
+        "```",
+        f"K1 =\n{np.array2string(np.asarray(K1), precision=6)}",
+        f"K2 =\n{np.array2string(np.asarray(K2), precision=6)}",
+        f"dist1 = {np.array2string(np.asarray(dist1).reshape(-1), precision=6)}",
+        f"dist2 = {np.array2string(np.asarray(dist2).reshape(-1), precision=6)}",
+        f"R =\n{np.array2string(np.asarray(R), precision=6)}",
+        f"T_cm = {np.array2string(np.asarray(T_cm).reshape(-1), precision=6)}",
+        "```",
+        "",
+        f"- baseline = {baseline_cm:.6f} cm",
+        f"- fx_rect = {fx_rect:.6f} px",
+        f"- swap_capture_halves = {SWAP_CAPTURE_HALVES}",
+        "",
+        "## 理论视差核对",
+        "",
+        f"- Z=30cm → disparity ≈ {fx_rect * baseline_cm / 30.0:.4f} px",
+        f"- Z=50cm → disparity ≈ {fx_rect * baseline_cm / 50.0:.4f} px",
+        f"- Z=100cm → disparity ≈ {fx_rect * baseline_cm / 100.0:.4f} px",
+        "",
+    ]
+
+    report_path = RUN_DIR / "calibration_report.md"
+    report_path.write_text("\n".join(lines), encoding="utf-8")
+    print(f"✅ 已归档标定报告: {report_path}")
+
 
 def main():
-    # 在任何标定计算之前创建本次程序启动的图像保存目录。
-    UNDERWATER_IMAGES_OUTPUT.mkdir(parents=True, exist_ok=True)
-    print(f"本次水下标定图像保存目录: {UNDERWATER_IMAGES_OUTPUT}")
+    # 在任何标定计算之前创建本次标定的归档目录（原图/角点/参数/报告都放这里）。
+    RUN_DIR.mkdir(parents=True, exist_ok=True)
+    print(f"本次水下标定归档目录: {RUN_DIR}")
 
     # Step 0：读取玻璃参数作为水下初值
     K1_glass, K2_glass, dist1_glass, dist2_glass, R_glass, T_glass_cm, img_size_from_npz = load_glass_params(
@@ -602,7 +706,7 @@ def main():
         print("   如果实际单目不是 640x480，后续会不准。")
 
     # Step 1：采集真实水下角点
-    objpoints, imgpoints_left, imgpoints_right = collect_underwater_corners()
+    objpoints, imgpoints_left, imgpoints_right, capture_stats = collect_underwater_corners()
 
     # Step 2：固定 K，只估计水下左右畸变
     K1_underwater, dist1_underwater, rms1 = calibrate_one_camera_fixed_K(
@@ -624,6 +728,8 @@ def main():
     )
 
     # Step 3：重新估计水下 R/T
+    stereo_rms = None
+
     if RECALIBRATE_STEREO_RT:
         R_use, T_use_cm, stereo_rms = stereo_calibrate_fixed_intrinsic(
             objpoints=objpoints,
@@ -647,8 +753,8 @@ def main():
         print(T_use_cm)
         print(f"baseline = {np.linalg.norm(T_use_cm):.6f} cm")
 
-    # Step 4：生成水下 map/Q
-    build_rectify_and_save_npz(
+    # Step 4：生成水下 map/Q（根目录最新版 + 历史归档）
+    baseline_cm, fx_rect = build_rectify_and_save_npz(
         K1=K1_underwater,
         dist1=dist1_underwater,
         K2=K2_underwater,
@@ -656,6 +762,22 @@ def main():
         R=R_use,
         T_cm=T_use_cm,
         img_size=IMG_SIZE
+    )
+
+    # Step 4.5：归档本次标定报告
+    write_calibration_report(
+        capture_stats=capture_stats,
+        rms_left=rms1,
+        rms_right=rms2,
+        stereo_rms=stereo_rms,
+        K1=K1_underwater,
+        K2=K2_underwater,
+        dist1=dist1_underwater,
+        dist2=dist2_underwater,
+        R=R_use,
+        T_cm=T_use_cm,
+        baseline_cm=baseline_cm,
+        fx_rect=fx_rect,
     )
 
     # Step 5：直接启动水下测深
