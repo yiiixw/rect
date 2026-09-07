@@ -4,7 +4,7 @@ rect_glass_calib_and_depth.py
 
 功能：
 1. 读取空气中双目标定得到的 K1、K2、dist1、dist2、R、T；
-2. 实时采集“空气 + 平板玻璃”下的左右棋盘格角点；
+2. 实时采集“空气 + 平板玻璃”下的左右原图并按时间戳归档，结束后统一检测角点；
 3. 固定空气中焦距和光心，只重新估计玻璃引起的左右畸变系数；
 4. 可选重新估计空气+玻璃下的双目 R、T；
 5. 重新生成 stereoRectify 的 map1/map2/Q；
@@ -20,6 +20,7 @@ rect_glass_calib_and_depth.py
 
 import cv2
 import numpy as np
+from datetime import datetime
 from pathlib import Path
 from scipy.io import loadmat
 
@@ -30,6 +31,12 @@ from stereo_depth_core import StereoDepthRunner
 # 1. 路径配置
 # =========================================================
 SCRIPT_DIR = Path(__file__).resolve().parent
+
+# 每次程序启动都使用独立时间戳目录保存玻璃标定原图。
+PROGRAM_START_TIMESTAMP = datetime.now().strftime("%Y%m%d_%H%M%S")
+GLASS_IMAGES_ROOT = SCRIPT_DIR / "glass_calibration_images"
+GLASS_IMAGES_OUTPUT = GLASS_IMAGES_ROOT / PROGRAM_START_TIMESTAMP
+
 MAT_INPUT = SCRIPT_DIR / "stereo_params_plain.mat"
 NPZ_OUTPUT = SCRIPT_DIR / "stereo_params_updated_with_glass.npz"
 AIR_RECTIFY_NPZ = SCRIPT_DIR / "stereo_params_updated.npz"
@@ -108,6 +115,15 @@ np.set_printoptions(
 # =========================================================
 # 工具函数
 # =========================================================
+def imwrite_unicode(path, img):
+    """支持含中文路径的 OpenCV 图像写入。"""
+    path = Path(path)
+    ok, encoded = cv2.imencode(path.suffix, img)
+    if ok:
+        encoded.tofile(str(path))
+    return bool(ok)
+
+
 def split_frame(frame):
     """
     把 1280x480 的双目拼接图切成左右两张 640x480。
@@ -298,6 +314,7 @@ def collect_glass_corners():
     先采集并缓存空气+玻璃下的左右原图，采集结束后再统一检测角点。
 
     采集阶段不做棋盘格检测，避免实时画面卡顿。
+    按 s 缓存的同时把原图落盘归档，与 rect_water.py 的归档方式对齐。
     """
     objp = make_object_points(PATTERN_SIZE, SQUARE_SIZE)
 
@@ -305,6 +322,13 @@ def collect_glass_corners():
     imgpoints_left = []
     imgpoints_right = []
     cached_pairs = []
+
+    left_output = GLASS_IMAGES_OUTPUT / "left"
+    right_output = GLASS_IMAGES_OUTPUT / "right"
+    pair_output = GLASS_IMAGES_OUTPUT / "pair"
+    left_output.mkdir(parents=True, exist_ok=True)
+    right_output.mkdir(parents=True, exist_ok=True)
+    pair_output.mkdir(parents=True, exist_ok=True)
 
     cap = cv2.VideoCapture(CAMERA_ID, cv2.CAP_DSHOW)
 
@@ -329,11 +353,12 @@ def collect_glass_corners():
 
     print("\n========== 采集空气+玻璃棋盘格角点 ==========")
     print("操作：")
-    print("  s：缓存当前左右原图")
+    print("  s：缓存并落盘当前左右原图")
     print("  q / ESC：结束采集，然后统一检测角点")
     print("建议：至少保存 15~30 组，姿态要有变化，棋盘格覆盖画面中心和边缘。")
     print(f"当前 PATTERN_SIZE = {PATTERN_SIZE}")
-    print("如果一直检测不到，优先把 PATTERN_SIZE 改成 (12, 9) 或检查是否填的是内角点数。\n")
+    print("如果一直检测不到，优先把 PATTERN_SIZE 改成 (12, 9) 或检查是否填的是内角点数。")
+    print(f"标定原图保存目录: {GLASS_IMAGES_OUTPUT}\n")
 
     idx = 0
 
@@ -362,9 +387,25 @@ def collect_glass_corners():
             break
 
         if key in (ord("s"), ord("S")):
-            cached_pairs.append((left.copy(), right.copy()))
-            idx += 1
-            print(f"✅ 已缓存第 {idx} 组原图")
+            save_idx = idx + 1
+            left_path = left_output / f"left_{save_idx:03d}.png"
+            right_path = right_output / f"right_{save_idx:03d}.png"
+            pair_path = pair_output / f"pair_{save_idx:03d}.png"
+            pair_raw = cv2.hconcat([left, right])
+
+            ok_save_l = imwrite_unicode(left_path, left)
+            ok_save_r = imwrite_unicode(right_path, right)
+            ok_save_pair = imwrite_unicode(pair_path, pair_raw)
+
+            if ok_save_l and ok_save_r and ok_save_pair:
+                cached_pairs.append((left.copy(), right.copy()))
+                idx = save_idx
+                print(f"✅ 已缓存并落盘第 {idx} 组原图")
+            else:
+                print(
+                    "⚠️ 图像落盘失败，该组不缓存。"
+                    f" left={ok_save_l}, right={ok_save_r}, pair={ok_save_pair}"
+                )
 
     cap.release()
     cv2.destroyAllWindows()
@@ -410,6 +451,7 @@ def collect_glass_corners():
     )
 
     print(f"✅ 已保存空气+玻璃角点数据: {CORNERS_OUTPUT}")
+    print(f"✅ 已保存空气+玻璃标定原图: {GLASS_IMAGES_OUTPUT}")
 
     return objpoints, imgpoints_left, imgpoints_right
 
@@ -619,6 +661,10 @@ def build_rectify_and_save_npz(K1, dist1, K2, dist2, R, T_cm, img_size, swap_air
 
 
 def main():
+    # 在任何标定计算之前创建本次程序启动的图像保存目录。
+    GLASS_IMAGES_OUTPUT.mkdir(parents=True, exist_ok=True)
+    print(f"本次玻璃标定图像保存目录: {GLASS_IMAGES_OUTPUT}")
+
     # =====================================================
     # Step 0：读取空气标定参数
     # =====================================================

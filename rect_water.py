@@ -6,7 +6,7 @@ rect_underwater_calib_and_depth.py
 
 核心思想：
 1. 读取已经验证没问题的玻璃参数 stereo_params_updated_with_glass.npz；
-2. 在真实下水状态下采集左右棋盘格角点；
+2. 在真实下水状态下采集左右原图并按时间戳归档，结束后统一检测角点；
 3. 固定玻璃模型中的 K1/K2，只重新最大似然估计水下 dist1/dist2；
 4. 固定水下 K/dist 后，重新最大似然估计水下双目 R/T；
 5. 重新 stereoRectify，生成水下专用 map 和 Q；
@@ -260,14 +260,17 @@ def make_object_points(pattern_size, square_size):
 
 def collect_underwater_corners():
     """
-    实时采集下水状态下的左右棋盘格角点。
-    只有左右都检测成功，按 s 才保存。
+    与 rect.py 采集模式对齐：
+    先采集并缓存下水状态下的左右原图（同时落盘归档），采集结束后再统一检测角点。
+
+    采集阶段不做棋盘格检测，避免实时画面卡顿。
     """
     objp = make_object_points(PATTERN_SIZE, SQUARE_SIZE)
 
     objpoints = []
     imgpoints_left = []
     imgpoints_right = []
+    cached_pairs = []
 
     left_output = UNDERWATER_IMAGES_OUTPUT / "left"
     right_output = UNDERWATER_IMAGES_OUTPUT / "right"
@@ -297,8 +300,8 @@ def collect_underwater_corners():
 
     print("\n========== 采集下水棋盘格角点 ==========")
     print("操作：")
-    print("  s：左右图都检测到角点时，保存这一组")
-    print("  q / ESC：结束采集")
+    print("  s：缓存并落盘当前左右原图")
+    print("  q / ESC：结束采集，然后统一检测角点")
     print("建议：至少保存 20~40 组。")
     print("姿态要求：近/中/远、左/中/右、上/中/下、轻微俯仰/偏航都要有。")
     print("注意：棋盘格必须真实在水中，且玻璃/外壳/相机位置不能再变。")
@@ -307,7 +310,6 @@ def collect_underwater_corners():
     print(f"标定原图保存目录: {UNDERWATER_IMAGES_OUTPUT}\n")
 
     idx = 0
-    saved_image_idx = 0
 
     while True:
         ret, frame = cap.read()
@@ -317,39 +319,9 @@ def collect_underwater_corners():
 
         left, right = split_frame(frame)
 
-        ok_l, corners_l = detect_corners(left, PATTERN_SIZE)
-        ok_r, corners_r = detect_corners(right, PATTERN_SIZE)
-
         vis_l = left.copy()
         vis_r = right.copy()
-
-        if ok_l:
-            cv2.drawChessboardCorners(
-                vis_l,
-                PATTERN_SIZE,
-                corners_l.reshape(-1, 1, 2),
-                ok_l
-            )
-            cv2.putText(vis_l, "LEFT OK", (20, 40),
-                        cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 2)
-        else:
-            cv2.putText(vis_l, "LEFT FAIL", (20, 40),
-                        cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 2)
-
-        if ok_r:
-            cv2.drawChessboardCorners(
-                vis_r,
-                PATTERN_SIZE,
-                corners_r.reshape(-1, 1, 2),
-                ok_r
-            )
-            cv2.putText(vis_r, "RIGHT OK", (20, 40),
-                        cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 2)
-        else:
-            cv2.putText(vis_r, "RIGHT FAIL", (20, 40),
-                        cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 2)
-
-        cv2.putText(vis_l, f"images={saved_image_idx} valid={idx}", (20, 80),
+        cv2.putText(vis_l, f"cached={idx}", (20, 40),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
 
         pair_vis = cv2.hconcat([vis_l, vis_r])
@@ -364,7 +336,7 @@ def collect_underwater_corners():
             break
 
         if key in (ord("s"), ord("S")):
-            save_idx = saved_image_idx + 1
+            save_idx = idx + 1
             left_path = left_output / f"left_{save_idx:03d}.png"
             right_path = right_output / f"right_{save_idx:03d}.png"
             pair_path = pair_output / f"pair_{save_idx:03d}.png"
@@ -375,28 +347,38 @@ def collect_underwater_corners():
             ok_save_pair = imwrite_unicode(pair_path, pair_raw)
 
             if ok_save_l and ok_save_r and ok_save_pair:
-                saved_image_idx = save_idx
-                print(f"✅ 已落盘第 {saved_image_idx} 组水下原图")
-
-                if ok_l and ok_r:
-                    objpoints.append(objp.copy())
-                    imgpoints_left.append(corners_l.astype(np.float32).copy())
-                    imgpoints_right.append(corners_r.astype(np.float32).copy())
-                    idx += 1
-                    print(f"✅ 该图像角点有效，已加入标定（有效 {idx} 组）")
-                else:
-                    print(
-                        "⚠️ 原图已落盘，但左右角点没有同时检测成功，"
-                        f"不加入标定。left={ok_l}, right={ok_r}"
-                    )
+                cached_pairs.append((left.copy(), right.copy()))
+                idx = save_idx
+                print(f"✅ 已缓存并落盘第 {idx} 组水下原图")
             else:
                 print(
-                    "⚠️ 图像落盘失败。"
+                    "⚠️ 图像落盘失败，该组不缓存。"
                     f" left={ok_save_l}, right={ok_save_r}, pair={ok_save_pair}"
                 )
 
     cap.release()
     cv2.destroyAllWindows()
+
+    print(f"\n开始统一检测 {len(cached_pairs)} 组缓存图像的棋盘格角点...")
+    for pair_idx, (left, right) in enumerate(cached_pairs, start=1):
+        ok_l, corners_l = detect_corners(left, PATTERN_SIZE)
+        ok_r, corners_r = detect_corners(right, PATTERN_SIZE)
+
+        if ok_l and ok_r:
+            objpoints.append(objp.copy())
+            imgpoints_left.append(corners_l.astype(np.float32).copy())
+            imgpoints_right.append(corners_r.astype(np.float32).copy())
+            print(f"✅ 第 {pair_idx}/{len(cached_pairs)} 组：左右角点检测成功")
+        else:
+            print(
+                f"⚠️ 第 {pair_idx}/{len(cached_pairs)} 组：已丢弃，"
+                f"left={ok_l}, right={ok_r}"
+            )
+
+    print(
+        f"角点检测完成：成功 {len(objpoints)} 组，"
+        f"失败 {len(cached_pairs) - len(objpoints)} 组。"
+    )
 
     if len(objpoints) < 10:
         raise RuntimeError(

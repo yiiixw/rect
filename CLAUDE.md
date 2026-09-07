@@ -37,14 +37,14 @@ matlab.mat (MATLAB stereoParameters)
 
 ### rect.py — 空气+玻璃标定
 1. 读 `stereo_params_plain.mat` 拿空气 K/dist/R/T；
-2. 实时采集（按 `s` 缓存原图，`q` 结束后统一检测角点，避免采集卡顿）；
+2. 实时采集（按 `s` 缓存并落盘原图到 `glass_calibration_images/<启动时间戳>/`，`q` 结束后统一检测角点，避免采集卡顿）；
 3. **固定焦距 fx/fy 和光心 cx/cy**，只重估玻璃引起的左右畸变 dist（5 参数 [k1,k2,p1,p2,k3]）；
 4. `RECALIBRATE_STEREO_RT=True` 时用 `CALIB_FIX_INTRINSIC` 重估双目 R/T；
 5. `stereoRectify` 生成 map1x/map1y/map2x/map2y/Q，保存 `stereo_params_updated_with_glass.npz`（同时存 `swap_lr`、`swap_capture_halves` 等一致性标记）；
 6. 可选直接启动测深。
 
 ### rect_water.py — 水下标定
-与 rect.py 同构，差异：初值来自玻璃 npz；每次启动按时间戳在 `underwater_calibration_images/<时间戳>/` 落盘原图；按 `s` 时实时检测角点，左右都成功才计入标定；**不做 1.33 经验缩放**（MLE 直接重估水下 dist 再重估 R/T）。
+与 rect.py 同构，差异：初值来自玻璃 npz（无 MATLAB 单位转换与 swap_lr 逻辑）；CLAHE clipLimit=2.5；`RECTIFY_ALPHA=0`（裁黑边求视差稳定）；标定迭代数更多；**不做 1.33 经验缩放**（MLE 直接重估水下 dist 再重估 R/T）。采集/归档模式与 rect.py 统一（见下方规则）。
 
 ## 硬性约定（改动前必须理解）
 
@@ -60,3 +60,4 @@ matlab.mat (MATLAB stereoParameters)
 ## 后续规则记录（持续追加）
 
 - 2026-09-07：初始化仓库（本地 git 管理，无远程）。`left/`、`right/`、`pair/`、`underwater_calibration_images/` 图像数据不入库；标定参数 npz/mat 和角点 npz 保留入库以便回滚到已验证的标定结果。
+- 2026-09-08：rect.py 与 rect_water.py 的采集/归档模式已统一：采集阶段只缓存+落盘原图（不做实时角点检测），`q` 后统一批量检测、左右都成功才计入标定；原图均按程序启动时间戳归档到 `<glass|underwater>_calibration_images/<时间戳>/{left,right,pair}/`，目录不入库。
