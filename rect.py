@@ -47,6 +47,7 @@ from stereo_depth_core import StereoDepthRunner
 # 1. 路径配置
 # =========================================================
 SCRIPT_DIR = Path(__file__).resolve().parent
+SCRIPT_DIR = SCRIPT_DIR / "inner-param" / "rebotfish1"
 
 # 每次程序启动都用独立时间戳目录归档本次标定的全部产物
 # （原图 / 角点 npz / 参数 npz / 标定报告），只增不覆盖，便于追溯历史。
@@ -95,7 +96,7 @@ SINGLE_HEIGHT = FRAME_HEIGHT
 IMG_SIZE = (SINGLE_WIDTH, SINGLE_HEIGHT)  # OpenCV 顺序：width, height
 
 # 当前摄像头拼接图的物理左右半边是反的，和 采集数据.py / 测量深度.py 保持一致。
-SWAP_CAPTURE_HALVES = True
+SWAP_CAPTURE_HALVES = False
 
 
 # =========================================================
@@ -118,7 +119,7 @@ MATLAB_T_UNIT = "mm"
 # stereoRectify 的 alpha：
 # 0：裁掉黑边，视差更稳定；
 # 1：保留全部视野，黑边更多。
-RECTIFY_ALPHA = 1
+RECTIFY_ALPHA = 0
 
 # 是否采集完成后直接启动测深
 RUN_DEPTH_AFTER_CALIB = True

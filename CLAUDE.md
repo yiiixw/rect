@@ -24,6 +24,8 @@ matlab.mat (MATLAB stereoParameters)
 测深入口（都复用 `stereo_depth_core.py` 的 `StereoDepthRunner`）：
 - `测量深度.py`：空气测距
 - `测量深度_玻璃.py`：加玻璃测距（玻璃须在标定时的同一位置）
+- `measure_depth_underwater.py`：水下测距，**不重新标定**；默认读根目录水下 npz 最新版，也可命令行指定历史 run 时间戳或任意 npz 路径（`--list` 列出可选 run）；折射深度修正由 npz 的 `depth_scale`/`depth_offset_cm` 驱动；s 键验证采样样本存根目录 `depth_samples/underwater_<时间戳>/`；d 键采集数据 → 同会话 `sampledata/{RGB,Depth,Depth_color}/`
+- `collect_depth_data.py`：下水数据采集入口（d 键整帧采集，s 键验证采样在此入口禁用）→ 根目录 `sampledata/underwater_<时间戳>/{RGB,Depth,Depth_color}/` 三件套，同一编号对应同一帧（RGB=对齐校正左图，Depth=**原始深度图 uint16 PNG，数值=深度毫米即 cm×10，无效像素 0，已折射修正**，Depth_color=彩色深度图）；参数解析复用 measure_depth_underwater.py（run 时间戳/npz 路径/`--list`）；d 键采集逻辑为 rect_water.py 的 `SampleDataStereoDepthRunner`（两入口共用，经 `on_key` 扩展点接入）
 - `基于WSL的立体匹配.py`：同一核心，只是视差窗口名不同
 - `rect.py` / `rect_water.py` 末尾在 `RUN_DEPTH_AFTER_CALIB=True` 时会直接进入测深
 
@@ -57,7 +59,7 @@ matlab.mat (MATLAB stereoParameters)
 3. **SWAP_LR ≠ SWAP_CAPTURE_HALVES**：`SWAP_LR`（立体校正.py）交换的是 MATLAB 标定的 Camera1/Camera2 顺序（R_new=R.T, T_new=-R.T@T，K/dist 同步交换）；`rect.py` 的 `SWAP_AIR_PARAMS_LR=None` 会从空气 npz 自动读取 `swap_lr`，二者不要手动绑定。
 4. **固定 K 的标定策略**：玻璃/水下阶段只重估畸变（`CALIB_FIX_FOCAL_LENGTH | CALIB_FIX_PRINCIPAL_POINT | CALIB_FIX_K4/K5/K6`），焦距光心继承上一阶段。这是项目核心方法论，勿随意放开。
 5. **npz 契约**：测深核心要求 npz 必含 `map1x/map1y/map2x/map2y/Q/image_size`，缺一即抛 KeyError。新增字段可以，删字段不行。
-6. **相机**：`CAMERA_ID=0`，`cv2.CAP_DSHOW`（Windows 专用），单目尺寸 640x480（`IMG_SIZE=(640,480)`，OpenCV 宽高序）。
+6. **相机**：`cv2.CAP_DSHOW`（Windows 专用），单目尺寸 640x480（`IMG_SIZE=(640,480)`，OpenCV 宽高序）。当前机器双目摄像头枚举为 `CAMERA_ID=1`（rect.py / rect_water.py / 测量深度_水下.py）；`测量深度.py` / `测量深度_玻璃.py` / `基于WSL的立体匹配.py` 仍硬编码 0，换入口运行前先核对。
 7. **棋盘格**：`PATTERN_SIZE=(8,11)` 是**内角点数**（横向×纵向），不是格子数；检测时先 `findChessboardCornersSB`（EXHAUSTIVE|ACCURACY），失败用传统方法+`cornerSubPix` 兜底；灰度先过 CLAHE 增强对抗玻璃反光/水下低对比；**检测后必须过 `canonicalize_corner_order` 统一角点链方向**（8×11 网格 180° 旋转对称，左右视图起点不一致会破坏双目对应、拖垮基线）。
 8. **中文路径**：脚本和图像目录含中文，写图必须走 `imwrite_unicode`（`cv2.imencode` + `tofile`），不要直接 `cv2.imwrite`。
 
@@ -74,3 +76,4 @@ matlab.mat (MATLAB stereoParameters)
   2. **深度规范修正**：固定空气 K 的水下标定输出折射虚拟深度 Z_v = c + Z_真实/n_w（近轴精确，数据上无法与真实深度规范区分——焦距扫描证实数据内无焦距信号，论文 §3.3 的 ×1.33 是物理先验而非拟合结果）。水下 npz 写入 `depth_scale=1.3333`/`depth_offset_cm≈1.1`（rect_water.py 配置 `WATER_REFRACTIVE_INDEX`/`WATER_PORT_OFFSET_CM`），`stereo_depth_core.measure_depth` 读取并按 Z_真实=scale×(Z_raw−offset) 还原；空气/玻璃 npz 无此二键，恒等不受影响；
   3. **numDisparities 128→192**：水下可测下限 12.2→8.1cm（空气 9→6.0cm）。
   附：`1.py` 的自由焦距路线实测不稳定（尺度简并，fx 漂移 ×1.5、RMS 恶化），勿作为修复手段。
+- 2026-09-08：**新增独立水下测深入口 `measure_depth_underwater.py`**——不重新标定，默认读根目录水下 npz，可命令行指定历史 run（如 `python measure_depth_underwater.py 20260908_015940`）或任意 npz 路径，`--list` 列出可用 run。**今后新建脚本文件一律用英文名**（用户要求）；存量中文脚本名（测量深度.py 等）未经用户指示不主动改。

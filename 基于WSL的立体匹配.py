@@ -12,8 +12,8 @@ from stereo_depth_core import StereoDepthRunner
 # =========================
 # 配置
 # =========================
-PARAM_FILE = Path(r"D:/rect/stereo_params_updated.npz")
-CAMERA_ID = 0
+PARAM_FILE = Path(r"D:\rect\inner-param\rebotfish1\stereo_params_updated.npz")
+CAMERA_ID = 1
 FRAME_WIDTH = 1280
 FRAME_HEIGHT = 480
 

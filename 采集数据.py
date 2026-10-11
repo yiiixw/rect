@@ -2,7 +2,7 @@
 import cv2
 from pathlib import Path
 
-CAMERA_ID = 0
+CAMERA_ID = 1
 FRAME_WIDTH = 1280
 FRAME_HEIGHT = 480
 
@@ -16,7 +16,7 @@ RIGHT_DIR.mkdir(parents=True, exist_ok=True)
 PAIR_DIR.mkdir(parents=True, exist_ok=True)
 
 # 如果实时拼接画面左半边和右半边本身反了，才改 True
-SWAP_CAPTURE_HALVES = True
+SWAP_CAPTURE_HALVES = False
 
 
 def imwrite_unicode(path, img):

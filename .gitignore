@@ -13,6 +13,11 @@ pair/
 
 # 历史标定归档：只忽略原图，角点/参数 npz 与标定报告入库
 calibration_history/**/images/
+# inner-param 下按相机归档的标定原图同样不入库
+inner-param/**/images/
+
+# 测深数据采集产物（整帧 RGB/深度图，体积大，不入库）
+sampledata/
 
 # 水下校准模型.pdf 的提取产物（原件已入库，可随时重新提取）
 _pdf_figs/

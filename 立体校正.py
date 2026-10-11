@@ -21,8 +21,8 @@ import numpy as np
 from scipy.io import loadmat
 
 # ================= 配置 =================
-MAT_INPUT = Path(r"D:/rect/stereo_params_plain.mat")
-NPZ_OUTPUT = Path(r"D:/rect/stereo_params_updated.npz")
+MAT_INPUT = Path(r"D:\rect\inner-param\rebotfish1\stereo_params_plain.mat")
+NPZ_OUTPUT = Path(r"D:\rect\inner-param\rebotfish1\stereo_params_updated.npz")
 
 # 如果 MATLAB 标定时的 Camera1/Camera2 与实时拼接画面的 left/right 反了，设为 True。
 # 你之前新参数 T_x 为正，而实时 SGBM 默认 left-right 正视差，所以通常需要 True。

@@ -44,6 +44,7 @@ import stereo_depth_core
 from stereo_depth_core import StereoDepthRunner
 
 
+
 # =========================================================
 # 1. 路径配置
 # =========================================================
@@ -868,7 +869,13 @@ class SamplingStereoDepthRunner(StereoDepthRunner):
     2. 弹窗输入实测真实深度，取消则整条放弃；
     3. 把图像文件名、像素坐标、测量值（disp/X/Y/Z/距离）、真实值和误差
        追加写入 sample_dir/depth_samples.json。
+
+    子类扩展点：覆写 on_key() 可处理 s/q 之外的按键（如 d 键采集），
+    extra_key_help 列表里的行会追加显示在启动按键帮助中。
     """
+
+    # 子类可覆写的额外按键帮助行（在启动时按键说明里逐行打印）
+    extra_key_help = []
 
     def __init__(self, *args, sample_dir, **kwargs):
         super().__init__(*args, **kwargs)
@@ -942,6 +949,15 @@ class SamplingStereoDepthRunner(StereoDepthRunner):
         )
         print(f"   样本目录: {self.sample_dir}")
 
+    def on_key(self, key, **frame_ctx):
+        """
+        子类扩展点：主循环里收到 s/q/ESC 之外的按键时回调到这里。
+        frame_ctx 携带本帧数据：left/right（原始左右图）、rect_left/rect_right
+        （校正左右图）、disparity（float 视差）、points_3d（reprojectImageTo3D 输出）。
+        基类不处理任何额外按键。
+        """
+        pass
+
     def run(self):
         """
         覆写基类 run()：主循环与基类一致，仅增加 s 键采样分支。
@@ -961,6 +977,8 @@ class SamplingStereoDepthRunner(StereoDepthRunner):
         print("\n========== 测深阶段按键 ==========")
         print("  鼠标左键：在校正图左半边点击选择待测点，实时显示深度")
         print("  s：保存深度验证样本（当前左右原图 + 测量数据 + 弹窗输入真实深度）")
+        for line in self.extra_key_help:
+            print(line)
         print("  q / ESC：退出")
         print(f"  样本保存目录: {self.sample_dir}\n")
 
@@ -1006,8 +1024,112 @@ class SamplingStereoDepthRunner(StereoDepthRunner):
                 # left/right 是喂给校正的原始左右图；result 是本帧该测点的测量结果
                 self.save_depth_sample(left, right, point, result)
 
+            if key not in (ord("q"), ord("Q"), 27, ord("s"), ord("S"), 255):
+                # 其余按键交给子类的 on_key 扩展点（255 = 本帧无按键）
+                self.on_key(
+                    key,
+                    left=left,
+                    right=right,
+                    rect_left=rect_left,
+                    rect_right=rect_right,
+                    disparity=disparity,
+                    points_3d=points_3d,
+                )
+
         self.cap.release()
         cv2.destroyAllWindows()
+
+
+class SampleDataStereoDepthRunner(SamplingStereoDepthRunner):
+    """
+    在 SamplingStereoDepthRunner 基础上增加 d 键数据采集动作：
+
+    按下 d 时把当前帧按类别存入 sampledata_dir/ 下三个子文件夹（同一编号对应同一帧）：
+    - RGB/rgb_XXX.png                 与深度图逐像素对齐的校正左 RGB 图
+    - Depth/depth_XXX.png             原始深度图 uint16（数值 = 深度毫米，即 cm×10，无效像素 0）
+    - Depth_color/depth_color_XXX.png 彩色深度图（逐帧归一化，仅肉眼查看）
+    深度口径与点击测深完全一致：Z_真实 = depth_scale * (|Z_raw| - depth_offset_cm)。
+
+    measure_depth_underwater.py 与 collect_depth_data.py 共用本类。
+    """
+
+    extra_key_help = [
+        "  d：采集数据（对齐RGB图 + 原始深度图 + 彩色深度图 → sampledata/{RGB,Depth,Depth_color}/）",
+    ]
+
+    def __init__(self, *args, sampledata_dir, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.sampledata_dir = Path(sampledata_dir)
+        self.sampledata_index = 0  # 首次落盘时从目录内已有文件恢复计数
+
+    def on_key(self, key, **frame_ctx):
+        if key in (ord("d"), ord("D")):
+            self.save_sampledata(
+                rect_left=frame_ctx["rect_left"],
+                disparity=frame_ctx["disparity"],
+                points_3d=frame_ctx["points_3d"],
+            )
+
+    def save_sampledata(self, rect_left, disparity, points_3d):
+        """
+        d 键动作的实际落盘逻辑：RGB/Depth/Depth_color 三件套。
+        原始深度图存 uint16 PNG：数值 = 深度毫米（Z_cm × 10），无效像素为 0。
+        """
+        # 与 stereo_depth_core.measure_depth 同口径：先 |Z_raw| 再减 offset 乘 scale
+        z_raw = points_3d[..., 2]
+        z_corr = self.depth_scale * (np.abs(z_raw) - self.depth_offset_cm)
+        ok = (
+            np.isfinite(disparity)
+            & (disparity > 0)
+            & np.isfinite(z_corr)
+            & (z_corr > 0)
+            & (z_corr <= 1000)
+        )
+
+        if not np.any(ok):
+            print("⚠️ 当前帧没有有效深度像素，本帧不保存。")
+            return
+
+        rgb_dir = self.sampledata_dir / "RGB"
+        depth_dir = self.sampledata_dir / "Depth"
+        depth_color_dir = self.sampledata_dir / "Depth_color"
+        rgb_dir.mkdir(parents=True, exist_ok=True)
+        depth_dir.mkdir(parents=True, exist_ok=True)
+        depth_color_dir.mkdir(parents=True, exist_ok=True)
+
+        if self.sampledata_index == 0:
+            existing = list(depth_dir.glob("depth_*.png"))
+            if existing:
+                self.sampledata_index = max(
+                    int(p.stem.split("_")[1]) for p in existing
+                )
+        self.sampledata_index += 1
+        idx = self.sampledata_index
+
+        # 原始深度图：uint16，数值 = 深度毫米（cm×10），无效像素为 0
+        depth_img = np.zeros(z_raw.shape, dtype=np.uint16)
+        depth_img[ok] = np.round(z_corr[ok] * 10.0).astype(np.uint16)
+
+        ok_rgb = imwrite_unicode(rgb_dir / f"rgb_{idx:03d}.png", rect_left)
+        ok_depth = imwrite_unicode(depth_dir / f"depth_{idx:03d}.png", depth_img)
+        ok_depth_color = imwrite_unicode(
+            depth_color_dir / f"depth_color_{idx:03d}.png",
+            self.disparity_to_color(np.where(ok, z_corr, np.nan)),
+        )
+
+        if not (ok_rgb and ok_depth and ok_depth_color):
+            print(
+                f"⚠️ sampledata 图像落盘异常（rgb={ok_rgb}, depth={ok_depth}, "
+                f"depth_color={ok_depth_color}），请检查保存目录。"
+            )
+            return
+
+        print(
+            f"✅ 已采集数据 #{idx}: RGB/ + Depth/ + Depth_color/，"
+            f"有效像素 {int(np.count_nonzero(ok))}，深度范围 "
+            f"{z_corr[ok].min():.2f}~{z_corr[ok].max():.2f} cm"
+        )
+        print(f"   保存目录: {self.sampledata_dir}")
 
 
 def main():

@@ -15,9 +15,9 @@ from stereo_depth_core import StereoDepthRunner
 # =========================
 # 配置
 # =========================
-PARAM_FILE = Path(r"D:/rect/stereo_params_updated.npz")
+PARAM_FILE = Path(r"D:\rect\inner-param\rebotfish1\stereo_params_updated.npz")
 # PARAM_FILE = Path(r"C:/Users/17434/Desktop/Camera/stereo_params_updated_with_glass.npz")
-CAMERA_ID = 0
+CAMERA_ID = 1
 FRAME_WIDTH = 1280
 FRAME_HEIGHT = 480
 
@@ -26,7 +26,7 @@ USE_WLS = True
 
 # 如果实时拼接画面左右半边本身反了，设 True。
 # 你的当前摄像头实测需要 True；否则空气测距会跳到 140cm 左右。
-SWAP_CAPTURE_HALVES = True
+SWAP_CAPTURE_HALVES = False
 
 # 如果知道真实深度，例如 50 cm，就填 50.0；否则保持 None。
 TRUE_Z_CM = 50

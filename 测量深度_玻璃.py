@@ -13,8 +13,8 @@ from stereo_depth_core import StereoDepthRunner
 # =========================
 # 配置
 # =========================
-PARAM_FILE = Path(__file__).resolve().parent / "stereo_params_updated_with_glass.npz"
-CAMERA_ID = 0
+PARAM_FILE = r"D:\rect\inner-param\rebotfish1\stereo_params_updated_with_glass.npz"
+CAMERA_ID = 1
 FRAME_WIDTH = 1280
 FRAME_HEIGHT = 480
 
@@ -23,7 +23,7 @@ USE_WLS = True
 
 # 必须和玻璃标定 rect.py 保持一致。
 # 当前摄像头拼接图的物理左右半边是反的，和 采集数据.py / 测量深度.py 保持一致。
-SWAP_CAPTURE_HALVES = True
+SWAP_CAPTURE_HALVES = False
 
 # 如果知道真实深度，例如 50 cm，就填 50.0；否则保持 None。
 TRUE_Z_CM = None
